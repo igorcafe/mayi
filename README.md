@@ -1,4 +1,4 @@
-# May I read your ~/.ssh/id_rsa?
+# May I read your `~/.ssh/id_rsa`?
 
 `mayi` intercepts potentially dangerous Linux system calls and prompts the user for confirmation before executing them.
 

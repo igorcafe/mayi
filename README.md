@@ -5,7 +5,7 @@
 ## Example
 
 ```shell
-mayi cat ../../.ssh/id_rsa                 
+$ mayi cat ../../.ssh/id_rsa                 
 May I read '/home/igor/.ssh/id_rsa'? [Y/n]: n
 cat: ../../.ssh/id_rsa: Permission denied
 ```

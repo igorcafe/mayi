@@ -13,4 +13,5 @@ cat: ../../.ssh/id_rsa: Permission denied
 ## Status
 
 This project is currently a proof of concept and **I'm NOT a security researcher**.
-For now I only implemented a special treatment for the `openat` system call.
+
+For now I only implemented this "gate" for `openat` system call.

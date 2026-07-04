@@ -361,6 +361,10 @@ int main(int argc, char **argv) {
           break;
         }
 
+        if (flags & (O_CREAT | O_TRUNC | O_APPEND)) {
+          want_write = true;
+        }
+
         perm = get_perm(conf, want_read, want_write);
       }
 

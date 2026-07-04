@@ -27,6 +27,8 @@ test () {
 
 test 'mayi.c compiles' 'gcc ../mayi.c -Wall -o tmp/mayi'
 
+test 'mayi.c tests' 'gcc ../mayi.c -Wall -DTEST -o tmp/test && ./tmp/test'
+
 test 'syscall.c compiles' 'gcc syscall.c -Wall -Wextra -o tmp/syscall'
 
 

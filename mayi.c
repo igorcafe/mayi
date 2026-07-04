@@ -115,25 +115,59 @@ struct config {
   enum config_perm write;
 };
 
-struct config configs[1024] = {{
-                                   .program = "*",
-                                   .pattern = "/etc/localtime",
-                                   .read = PERM_ALLOW,
-                                   .write = PERM_DENY,
-                               },
-                               {
-                                   .program = "*",
-                                   .pattern = "/nix/store/*",
-                                   .read = PERM_ALLOW,
-                                   .write = PERM_DENY,
-                               },
-                               {
-                                   .program = "*",
-                                   .pattern = "/run/current-system/*",
-                                   .read = PERM_ALLOW,
-                                   .write = PERM_DENY,
-                               }};
+struct config configs[1024] = {0};
 // /run/current-system/sw/lib/locale/locale-archive
+
+void parse_config(FILE *file) {
+  int i = 0;
+  char line[1000];
+  char *program = NULL;
+  while (fgets(line, sizeof(line), file) != NULL) {
+    /* printf("%s", line); */
+    if (line[0] == '[' && line[strlen(line) - 2] == ']') {
+      line[strlen(line) - 2] = '\0';
+      program = strdup(&line[1]);
+    } else {
+      char key[500];
+      char val[500];
+
+      if (sscanf(line, " %499[^ =] = %499[^\n]", key, val) == 2) {
+        enum config_perm read = PERM_ASK;
+        enum config_perm write = PERM_ASK;
+
+        if (strstr(val, "read:deny")) {
+          read = PERM_DENY;
+        } else if (strstr(val, "read:ask")) {
+          read = PERM_ASK;
+        } else if (strstr(val, "read")) {
+          read = PERM_ALLOW;
+        }
+
+        if (strstr(val, "write:deny")) {
+          write = PERM_DENY;
+        } else if (strstr(val, "write:ask")) {
+          write = PERM_ASK;
+        } else if (strstr(val, "write")) {
+          write = PERM_ALLOW;
+        }
+
+        printf("%s: read(%d) write(%d)\n", key, read, write);
+
+        configs[i] = (struct config){
+            .program = strdup(program),
+            .pattern = strdup(key),
+            .read = read,
+            .write = write,
+        };
+        i++;
+
+        if (i >= sizeof(configs) / sizeof(configs[0])) {
+          break;
+        }
+      }
+    }
+  }
+}
 
 int resolve_path(int pid, int dirfd, char *path) {
   if (path[0] == '/') {
@@ -183,6 +217,7 @@ void find_config(struct config *config, char *program, char *path) {
         fnmatch(configs[i].pattern, path, 0) == 0) {
       /* printf("found pattern: %s (%d)\n", configs[i].pattern, i); */
       *config = configs[i];
+      break;
     }
   }
 }
@@ -210,6 +245,16 @@ int main(int argc, char **argv) {
     printf("\n");
     printf("missing target program\n");
     return 1;
+  }
+
+  if (getenv("HOME")) {
+    char path[300];
+    snprintf(path, sizeof(path), "%s/.config/mayi.ini", getenv("HOME"));
+    FILE *file = fopen(path, "r");
+    if (file) {
+      parse_config(file);
+      /* exit(0); */
+    }
   }
 
   // TODO: improve filter to only filter the system calls we care about

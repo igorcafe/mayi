@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <fnmatch.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <stdbool.h>
@@ -100,6 +101,39 @@ ssize_t read_child_string(pid_t pid, void *addr, char *buf, size_t size) {
 
   return n;
 }
+
+enum config_perm {
+  PERM_DENY,
+  PERM_ASK,
+  PERM_ALLOW,
+};
+
+struct config {
+  char *program;
+  char *pattern;
+  enum config_perm read;
+  enum config_perm write;
+};
+
+struct config configs[1024] = {{
+                                   .program = "*",
+                                   .pattern = "/etc/localtime",
+                                   .read = PERM_ALLOW,
+                                   .write = PERM_DENY,
+                               },
+                               {
+                                   .program = "*",
+                                   .pattern = "/nix/store/*",
+                                   .read = PERM_ALLOW,
+                                   .write = PERM_DENY,
+                               },
+                               {
+                                   .program = "*",
+                                   .pattern = "/run/current-system/*",
+                                   .read = PERM_ALLOW,
+                                   .write = PERM_DENY,
+                               }};
+// /run/current-system/sw/lib/locale/locale-archive
 
 int main(int argc, char **argv) {
   if (argc < 2) {
@@ -223,27 +257,59 @@ int main(int argc, char **argv) {
           strncpy(path, cwd, strlen(cwd));
           path[strlen(cwd)] = '/';
 
+          // FIXME: it works in my machine 🫣
           realpath(path, path);
         }
 
-        if (!str_has_prefix(path, "/nix/store") &&
-            !str_has_prefix(path, "/run")) {
-          int flags = (int)req.data.args[2];
-          char sflag[30];
-          switch (flags & O_ACCMODE) {
-          case O_RDONLY:
-            snprintf(sflag, sizeof(sflag), "read");
-            break;
-          case O_WRONLY:
-            snprintf(sflag, sizeof(sflag), "write");
-            break;
-          case O_RDWR:
-            snprintf(sflag, sizeof(sflag), "read AND write");
-            break;
-          default:
-            snprintf(sflag, sizeof(sflag), "%d", flags);
+        struct config current_conf = {
+            .read = PERM_ASK,
+            .write = PERM_ASK,
+        };
+
+        for (int i = 1023; i >= 0; i--) {
+          if (!configs[i].program || !configs[i].pattern) {
+            continue;
+          }
+
+          if ((strcmp(configs[i].program, "*") == 0 ||
+               strcmp(configs[i].program, argv[1]) == 0) &&
+              fnmatch(configs[i].pattern, path, 0) == 0) {
+            /* printf("found pattern: %s (%d)\n", configs[i].pattern, i); */
+            current_conf = configs[i];
             break;
           }
+        }
+
+        bool want_read = false;
+        bool want_write = false;
+
+        int flags = (int)req.data.args[2];
+        char sflag[30];
+        switch (flags & O_ACCMODE) {
+        case O_RDONLY:
+          want_read = true;
+          snprintf(sflag, sizeof(sflag), "read from");
+          break;
+        case O_WRONLY:
+          want_write = true;
+          snprintf(sflag, sizeof(sflag), "write to");
+          break;
+        case O_RDWR:
+          want_read = true;
+          want_write = true;
+          snprintf(sflag, sizeof(sflag), "read AND write to");
+          break;
+        default:
+          snprintf(sflag, sizeof(sflag), "%d", flags);
+          break;
+        }
+
+        if ((want_read && current_conf.read == PERM_DENY) ||
+            (want_write && current_conf.write == PERM_DENY)) {
+          resp.flags = 0;
+          resp.error = -EACCES;
+        } else if ((want_read && current_conf.read != PERM_ALLOW) ||
+                   (want_write && current_conf.write != PERM_ALLOW)) {
           fprintf(stderr, "May I %s '%s'? [Y/n]: ", sflag, path);
           fflush(stdout);
 

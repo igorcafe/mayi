@@ -14,4 +14,11 @@ cat: ../../.ssh/id_rsa: Permission denied
 
 This project is currently a proof of concept and **I'm NOT a security researcher**.
 
-For now I only implemented this "gate" for `openat` system call.
+For now I implemented this "gate" mechanism for the following system calls:
+
+- `open`
+- `creat`
+- `openat`
+- `openat2`
+- `unlink`
+- `unlinkat`

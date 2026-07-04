@@ -203,7 +203,7 @@ int resolve_path(int dirfd, char *cwd, char *path) {
   path[strlen(cwd)] = '/';
 
   realpath(path, path2);
-  strncpy(path, path2, sizeof(path2));
+  strncpy(path, path2, 2048);
 
   return 0;
 }

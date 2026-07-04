@@ -187,32 +187,16 @@ void find_config(struct config *config, char *program, char *path) {
   }
 }
 
-enum config_perm get_perm(struct config conf, bool want_read, bool want_write) {
-  if ((want_read && conf.read == PERM_DENY) ||
-      (want_write && conf.write == PERM_DENY)) {
+enum config_perm get_perm(struct config conf, bool read, bool write) {
+  if ((read && conf.read == PERM_DENY) || (write && conf.write == PERM_DENY)) {
     return PERM_DENY;
   }
 
-  if ((want_read && conf.read == PERM_ASK) ||
-      (want_write && conf.write == PERM_ASK)) {
+  if ((read && conf.read == PERM_ASK) || (write && conf.write == PERM_ASK)) {
     return PERM_ASK;
   }
 
   return PERM_ALLOW;
-}
-
-char ask_perm(char *path, bool want_read, bool want_write) {
-  if (want_read && want_write) {
-    fprintf(stderr, "May I read AND write '%s'? [Y/n]: ", path);
-  } else if (want_read) {
-    fprintf(stderr, "May I read '%s'? [Y/n]: ", path);
-  } else if (want_write) {
-    fprintf(stderr, "May I read '%s'? [Y/n]: ", path);
-  } else {
-    return '\0';
-  }
-  fflush(stdout);
-  return getchar();
 }
 
 void handle_open(struct config conf, char *path, int flags) {}
@@ -304,10 +288,44 @@ int main(int argc, char **argv) {
       resp.id = req.id;
       resp.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
 
-      char path[4096];
-      enum config_perm perm = PERM_ASK;
-      bool want_read = false;
-      bool want_write = false;
+      char path[2048];
+      enum config_perm perm = PERM_ALLOW;
+      bool read = false;
+      bool write = false;
+      char prompt[4096] = "";
+
+      struct config conf = {
+          .program = argv[1],
+          .read = PERM_ASK,
+          .write = PERM_ASK,
+      };
+
+      if (req.data.nr == SYS_unlink || req.data.nr == SYS_unlinkat) {
+        write = true;
+        int dirfd = AT_FDCWD;
+        void *raw_path = NULL;
+
+        if (req.data.nr == SYS_unlink) {
+          raw_path = (void *)req.data.args[0];
+        } else {
+          dirfd = (int)(int32_t)req.data.args[0];
+          raw_path = (void *)req.data.args[1];
+        }
+
+        if (read_child_string(req.pid, raw_path, path, sizeof(path)) < 0) {
+          perror("read_child_string");
+          return 1;
+        }
+        if (resolve_path(pid, dirfd, path) != 0) {
+          return 1;
+        }
+
+        find_config(&conf, argv[1], path);
+        perm = get_perm(conf, read, write);
+
+        snprintf(prompt, sizeof(prompt),
+                 "May I delete your '%s'? [Y/n]: ", path);
+      }
 
       if (req.data.nr == SYS_open || req.data.nr == SYS_creat ||
           req.data.nr == SYS_openat || req.data.nr == SYS_openat2) {
@@ -337,42 +355,46 @@ int main(int argc, char **argv) {
           return 1;
         }
 
-        struct config conf = {
-            .program = argv[1],
-            .read = PERM_ASK,
-            .write = PERM_ASK,
-        };
-
         find_config(&conf, argv[1], path);
 
         switch (flags & O_ACCMODE) {
         case O_RDONLY:
-          want_read = true;
+          read = true;
+          snprintf(prompt, sizeof(prompt),
+                   "May I read your '%s'? [Y/n]: ", path);
           break;
         case O_WRONLY:
-          want_write = true;
+          write = true;
+          snprintf(prompt, sizeof(prompt),
+                   "May I write to your '%s'? [Y/n]: ", path);
           break;
         case O_RDWR:
-          want_read = true;
-          want_write = true;
+          read = true;
+          write = true;
+          snprintf(prompt, sizeof(prompt),
+                   "May I read AND write to your '%s'? [Y/n]: ", path);
           break;
         default:
           fprintf(stderr, "unexpected flags: %016b\n", flags & O_ACCMODE);
-          break;
+          return 1;
         }
 
         if (flags & (O_CREAT | O_TRUNC | O_APPEND)) {
-          want_write = true;
+          snprintf(prompt, sizeof(prompt),
+                   "May I write to your '%s'? [Y/n]: ", path);
+          write = true;
         }
 
-        perm = get_perm(conf, want_read, want_write);
+        perm = get_perm(conf, read, write);
       }
 
       if (perm == PERM_DENY) {
         resp.flags = 0;
         resp.error = -EACCES;
       } else if (perm == PERM_ASK) {
-        char answer = ask_perm(path, want_read, want_write);
+        fprintf(stdout, "%s", prompt);
+        fflush(stdout);
+        char answer = getchar();
         if (answer == 'n') {
           resp.flags = 0;
           resp.error = -EACCES;

@@ -8,7 +8,7 @@
 #include <unistd.h>
 
 static void usage(char *program) {
-  fprintf(stderr, "usage: %s {open|creat|openat|openat2} PATH [FLAGS]\n", program);
+  fprintf(stderr, "usage: %s {open|creat|openat|openat2|unlink|unlinkat} PATH [FLAGS]\n", program);
   fprintf(stderr, "flags: r, w, rw, c=create, t=truncate, a=append, x=exclusive, d=directory\n");
 }
 
@@ -75,7 +75,8 @@ int main(int argc, char **argv) {
   int flags = 0;
   int fd = -1;
 
-  if (strcmp(name, "creat") != 0 && parse_flags(flag_string, &flags) < 0) {
+  if (strcmp(name, "creat") != 0 && strcmp(name, "unlink") != 0 &&
+      strcmp(name, "unlinkat") != 0 && parse_flags(flag_string, &flags) < 0) {
     perror("flags");
     return 2;
   }
@@ -93,6 +94,10 @@ int main(int argc, char **argv) {
     };
 
     fd = syscall(SYS_openat2, AT_FDCWD, path, &how, sizeof(how));
+  } else if (strcmp(name, "unlink") == 0) {
+    return syscall(SYS_unlink, path) == 0 ? 0 : (perror(name), 1);
+  } else if (strcmp(name, "unlinkat") == 0) {
+    return syscall(SYS_unlinkat, AT_FDCWD, path, 0) == 0 ? 0 : (perror(name), 1);
   } else {
     usage(argv[0]);
     return 2;

@@ -55,3 +55,29 @@ test 'openat2 read allowed' 'echo "" | ./tmp/mayi ./tmp/syscall openat2 tmp/exis
 
 test 'openat2 create disallowed' '! echo "n" | ./tmp/mayi ./tmp/syscall openat2 tmp/created-openat2 wc'
 test 'openat2 create allowed' 'echo "" | ./tmp/mayi ./tmp/syscall openat2 tmp/created-openat2 wc'
+
+printf '' > tmp/delete-unlink
+test 'unlink disallowed' '! echo "n" | ./tmp/mayi ./tmp/syscall unlink tmp/delete-unlink'
+test 'unlink disallowed keeps file' '[ -e tmp/delete-unlink ]'
+test 'unlink allowed' 'echo "" | ./tmp/mayi ./tmp/syscall unlink tmp/delete-unlink'
+test 'unlink allowed deletes file' '[ ! -e tmp/delete-unlink ]'
+
+printf '' > tmp/delete-unlinkat
+test 'unlinkat disallowed' '! echo "n" | ./tmp/mayi ./tmp/syscall unlinkat tmp/delete-unlinkat'
+test 'unlinkat disallowed keeps file' '[ -e tmp/delete-unlinkat ]'
+test 'unlinkat allowed' 'echo "" | ./tmp/mayi ./tmp/syscall unlinkat tmp/delete-unlinkat'
+test 'unlinkat allowed deletes file' '[ ! -e tmp/delete-unlinkat ]'
+
+printf '' > tmp/delete-rm
+test 'rm disallowed' '! echo "n" | ./tmp/mayi rm tmp/delete-rm'
+test 'rm disallowed keeps file' '[ -e tmp/delete-rm ]'
+test 'rm allowed' 'echo "" | ./tmp/mayi rm tmp/delete-rm'
+test 'rm allowed deletes file' '[ ! -e tmp/delete-rm ]'
+
+mkdir -p tmp/delete-rm-r
+printf '' > tmp/delete-rm-r/file
+test 'rm -r disallowed' '! echo "n" | ./tmp/mayi rm -r tmp/delete-rm-r'
+test 'rm -r disallowed keeps directory' '[ -d tmp/delete-rm-r ]'
+test 'rm -r disallowed keeps file' '[ -e tmp/delete-rm-r/file ]'
+test 'rm -r allowed' 'printf "\n\n\n" | ./tmp/mayi rm -r tmp/delete-rm-r'
+test 'rm -r allowed deletes directory' '[ ! -e tmp/delete-rm-r ]'

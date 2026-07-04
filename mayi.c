@@ -257,17 +257,28 @@ int main(int argc, char **argv) {
     }
   }
 
-  // TODO: improve filter to only filter the system calls we care about
   struct sock_filter filter[] = {
       BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
 
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_sendmsg, 0, 1),
-      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-
-      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_exit_group, 0, 1),
-      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_open, 0, 1),
       BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_creat, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_openat, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_openat2, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_unlink, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+
+      BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_unlinkat, 0, 1),
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_USER_NOTIF),
+
+      BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
   };
   if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
     perror("couldn't use seccomp in unprivileged mode");

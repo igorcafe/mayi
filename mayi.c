@@ -151,8 +151,6 @@ void parse_config(FILE *file) {
           write = PERM_ALLOW;
         }
 
-        printf("%s: read(%d) write(%d)\n", key, read, write);
-
         configs[i] = (struct config){
             .program = strdup(program),
             .pattern = strdup(key),

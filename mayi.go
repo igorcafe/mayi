@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -20,14 +21,71 @@ func main() {
 		os.Exit(1)
 	}
 
-	file, err := os.Open("/home/igor/.config/mayi.ini")
+	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
+
+	if os.Args[1] == "--child" {
+		fmt.Println("child!")
+		childSock := 3
+		_, err = unix.Write(childSock, []byte("hi"))
+		if err != nil {
+			panic(err)
+		}
+
+		for {
+		}
+		return
+	}
+
+	parentSock := sockets[0]
+	childSock := sockets[1]
+
+	pid, err := syscall.ForkExec(
+		"/proc/self/exe",
+		append([]string{"/proc/self/exe", "--child"}, os.Args[2:]...),
+		&syscall.ProcAttr{
+			Env: os.Environ(),
+			Files: []uintptr{
+				uintptr(0),
+				uintptr(1),
+				uintptr(2),
+				uintptr(childSock),
+			},
+		},
+	)
 	if err != nil {
 		panic(err)
 	}
-	defer file.Close()
 
-	configs, err := ParseConfig(file)
-	fmt.Printf("%+#v\n", configs)
+	err = unix.Close(childSock)
+	if err != nil {
+		panic(err)
+	}
+
+	buf := make([]byte, 10)
+	_, err = unix.Read(parentSock, buf)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("recv:", string(buf))
+
+	cwd, err := ProcessCWD(pid, unix.AT_FDCWD)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println("cwd", cwd)
+
+	var configs []Config
+
+	file, err := os.Open("/home/igor/.config/mayi.ini")
+	if err == nil {
+		defer file.Close()
+		configs, err = ParseConfig(file)
+		// fmt.Printf("%+#v\n", configs)
+		if err != nil {
+			panic(err)
+		}
+	}
 
 	conf, found := FindConfigMatch(configs, Intent{
 		Program: "emacs",

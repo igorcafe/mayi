@@ -135,6 +135,88 @@ struct config configs[1024] = {{
                                }};
 // /run/current-system/sw/lib/locale/locale-archive
 
+int resolve_path(int pid, int dirfd, char *path) {
+  if (path[0] == '/') {
+    return 0;
+  }
+
+  char cwd[4096];
+
+  if (dirfd == AT_FDCWD) {
+    char procpath[100];
+    snprintf(procpath, sizeof(procpath), "/proc/%d/cwd", pid);
+    ssize_t n = readlink(procpath, cwd, sizeof(procpath) - 1);
+    if (n < 0) {
+      perror("readlink cwd");
+      return 1;
+    }
+    cwd[n] = '\0';
+  } else {
+    char procpath[100];
+    snprintf(procpath, sizeof(procpath), "/proc/%d/fd/%d", pid, dirfd);
+    ssize_t n = readlink(procpath, cwd, sizeof(procpath) - 1);
+    if (n < 0) {
+      perror("readlink fd");
+      return 1;
+    }
+    cwd[n] = '\0';
+  }
+
+  memmove(path + strlen(cwd) + 1, path, strlen(path) + 1);
+  strncpy(path, cwd, strlen(cwd));
+  path[strlen(cwd)] = '/';
+
+  // FIXME: it works in my machine 🫣
+  realpath(path, path);
+
+  return 0;
+}
+
+void find_config(struct config *config, char *program, char *path) {
+  for (int i = 1023; i >= 0; i--) {
+    if (!configs[i].program || !configs[i].pattern) {
+      continue;
+    }
+
+    if ((strcmp(configs[i].program, "*") == 0 ||
+         strcmp(configs[i].program, program) == 0) &&
+        fnmatch(configs[i].pattern, path, 0) == 0) {
+      /* printf("found pattern: %s (%d)\n", configs[i].pattern, i); */
+      *config = configs[i];
+    }
+  }
+}
+
+enum config_perm get_perm(struct config conf, bool want_read, bool want_write) {
+  if ((want_read && conf.read == PERM_DENY) ||
+      (want_write && conf.write == PERM_DENY)) {
+    return PERM_DENY;
+  }
+
+  if ((want_read && conf.read == PERM_ASK) ||
+      (want_write && conf.write == PERM_ASK)) {
+    return PERM_ASK;
+  }
+
+  return PERM_ALLOW;
+}
+
+char ask_perm(char *path, bool want_read, bool want_write) {
+  if (want_read && want_write) {
+    fprintf(stderr, "May I read AND write '%s'? [Y/n]: ", path);
+  } else if (want_read) {
+    fprintf(stderr, "May I read '%s'? [Y/n]: ", path);
+  } else if (want_write) {
+    fprintf(stderr, "May I read '%s'? [Y/n]: ", path);
+  } else {
+    return '\0';
+  }
+  fflush(stdout);
+  return getchar();
+}
+
+void handle_open(struct config conf, char *path, int flags) {}
+
 int main(int argc, char **argv) {
   if (argc < 2) {
     printf("args: ");
@@ -146,6 +228,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  // TODO: improve filter to only filter the system calls we care about
   struct sock_filter filter[] = {
       BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
 
@@ -221,102 +304,72 @@ int main(int argc, char **argv) {
       resp.id = req.id;
       resp.flags = SECCOMP_USER_NOTIF_FLAG_CONTINUE;
 
-      if (req.data.nr == SYS_openat) {
-        int dirfd = (int)(int32_t)req.data.args[0];
-        char path[4096];
-        if (read_child_string(req.pid, (void *)req.data.args[1], path,
-                              sizeof(path)) < 0) {
+      char path[4096];
+      enum config_perm perm = PERM_ASK;
+      bool want_read = false;
+      bool want_write = false;
+
+      if (req.data.nr == SYS_open || req.data.nr == SYS_creat ||
+          req.data.nr == SYS_openat || req.data.nr == SYS_openat2) {
+        int dirfd = AT_FDCWD;
+        void *raw_path = NULL;
+        int flags = 0;
+
+        if (req.data.nr == SYS_open) {
+          raw_path = (void *)req.data.args[0];
+          flags = (int)req.data.args[1];
+        } else if (req.data.nr == SYS_creat) {
+          raw_path = (void *)req.data.args[0];
+          flags = O_WRONLY | O_CREAT | O_TRUNC;
+        } else {
+          dirfd = (int)(int32_t)req.data.args[0];
+          raw_path = (void *)req.data.args[1];
+          flags = (int)req.data.args[2];
+        }
+
+        if (read_child_string(req.pid, raw_path, path, sizeof(path)) < 0) {
           perror("read_child_string");
           return 1;
         }
-
-        if (path[0] != '/') {
-          char cwd[4096];
-
-          if (dirfd == AT_FDCWD) {
-            char procpath[100];
-            snprintf(procpath, sizeof(procpath), "/proc/%d/cwd", pid);
-            ssize_t n = readlink(procpath, cwd, sizeof(procpath) - 1);
-            if (n < 0) {
-              perror("readlink cwd");
-              return 1;
-            }
-            cwd[n] = '\0';
-          } else {
-            char procpath[100];
-            snprintf(procpath, sizeof(procpath), "/proc/%d/fd/%d", pid, dirfd);
-            ssize_t n = readlink(procpath, cwd, sizeof(procpath) - 1);
-            if (n < 0) {
-              perror("readlink fd");
-              return 1;
-            }
-            cwd[n] = '\0';
-          }
-
-          memmove(path + strlen(cwd) + 1, path, strlen(path) + 1);
-          strncpy(path, cwd, strlen(cwd));
-          path[strlen(cwd)] = '/';
-
-          // FIXME: it works in my machine 🫣
-          realpath(path, path);
+        if (resolve_path(pid, dirfd, path) != 0) {
+          return 1;
         }
 
-        struct config current_conf = {
+        struct config conf = {
+            .program = argv[1],
             .read = PERM_ASK,
             .write = PERM_ASK,
         };
 
-        for (int i = 1023; i >= 0; i--) {
-          if (!configs[i].program || !configs[i].pattern) {
-            continue;
-          }
+        find_config(&conf, argv[1], path);
 
-          if ((strcmp(configs[i].program, "*") == 0 ||
-               strcmp(configs[i].program, argv[1]) == 0) &&
-              fnmatch(configs[i].pattern, path, 0) == 0) {
-            /* printf("found pattern: %s (%d)\n", configs[i].pattern, i); */
-            current_conf = configs[i];
-            break;
-          }
-        }
-
-        bool want_read = false;
-        bool want_write = false;
-
-        int flags = (int)req.data.args[2];
-        char sflag[30];
         switch (flags & O_ACCMODE) {
         case O_RDONLY:
           want_read = true;
-          snprintf(sflag, sizeof(sflag), "read from");
           break;
         case O_WRONLY:
           want_write = true;
-          snprintf(sflag, sizeof(sflag), "write to");
           break;
         case O_RDWR:
           want_read = true;
           want_write = true;
-          snprintf(sflag, sizeof(sflag), "read AND write to");
           break;
         default:
-          snprintf(sflag, sizeof(sflag), "%d", flags);
+          fprintf(stderr, "unexpected flags: %016b\n", flags & O_ACCMODE);
           break;
         }
 
-        if ((want_read && current_conf.read == PERM_DENY) ||
-            (want_write && current_conf.write == PERM_DENY)) {
+        perm = get_perm(conf, want_read, want_write);
+      }
+
+      if (perm == PERM_DENY) {
+        resp.flags = 0;
+        resp.error = -EACCES;
+      } else if (perm == PERM_ASK) {
+        char answer = ask_perm(path, want_read, want_write);
+        if (answer == 'n') {
           resp.flags = 0;
           resp.error = -EACCES;
-        } else if ((want_read && current_conf.read != PERM_ALLOW) ||
-                   (want_write && current_conf.write != PERM_ALLOW)) {
-          fprintf(stderr, "May I %s '%s'? [Y/n]: ", sflag, path);
-          fflush(stdout);
-
-          if (getchar() == 'n') {
-            resp.flags = 0;
-            resp.error = -EACCES;
-          }
         }
       }
 

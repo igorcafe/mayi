@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -35,6 +37,14 @@ func main() {
 	})
 
 	fmt.Printf("%v - %+#v\n", found, conf)
+}
+
+func ProcessCWD(pid, dirfd int) (string, error) {
+	if dirfd == unix.AT_FDCWD {
+		return os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	} else {
+		return os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", pid, dirfd))
+	}
 }
 
 type Perm int

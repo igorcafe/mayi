@@ -210,6 +210,14 @@ void find_config(struct config *config, char *program, char *path) {
       continue;
     }
 
+    if (configs[i].pattern[0] == '$') {
+      char *var = getenv(&configs[i].pattern[1]);
+      if (!var) {
+        continue;
+      }
+      configs[i].pattern = var;
+    }
+
     if ((strcmp(configs[i].program, "*") == 0 ||
          strcmp(configs[i].program, program) == 0) &&
         fnmatch(configs[i].pattern, path, 0) == 0) {

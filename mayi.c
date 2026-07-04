@@ -1,4 +1,5 @@
 #define _GNU_SOURCE
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fnmatch.h>
@@ -167,13 +168,7 @@ void parse_config(FILE *file) {
   }
 }
 
-int resolve_path(int pid, int dirfd, char *path) {
-  if (path[0] == '/') {
-    return 0;
-  }
-
-  char cwd[4096];
-
+int proc_cwd(int pid, int dirfd, char *cwd, size_t max) {
   if (dirfd == AT_FDCWD) {
     char procpath[100];
     snprintf(procpath, sizeof(procpath), "/proc/%d/cwd", pid);
@@ -193,13 +188,22 @@ int resolve_path(int pid, int dirfd, char *path) {
     }
     cwd[n] = '\0';
   }
+  return 0;
+}
 
-  memmove(path + strlen(cwd) + 1, path, strlen(path) + 1);
+int resolve_path(int dirfd, char *cwd, char *path) {
+  static char path2[2048];
+
+  if (path[0] == '/') {
+    return 0;
+  }
+
+  memmove(path + strlen(cwd) + 1, path, 2048);
   strncpy(path, cwd, strlen(cwd));
   path[strlen(cwd)] = '/';
 
-  // FIXME: it works in my machine 🫣
-  realpath(path, path);
+  realpath(path, path2);
+  strncpy(path, path2, sizeof(path2));
 
   return 0;
 }
@@ -242,6 +246,7 @@ enum config_perm get_perm(struct config conf, bool read, bool write) {
 
 void handle_open(struct config conf, char *path, int flags) {}
 
+#ifndef TEST
 int main(int argc, char **argv) {
   if (argc < 2) {
     printf("args: ");
@@ -378,7 +383,9 @@ int main(int argc, char **argv) {
           perror("read_child_string");
           return 1;
         }
-        if (resolve_path(pid, dirfd, path) != 0) {
+        char cwd[4096];
+        proc_cwd(pid, dirfd, cwd, sizeof(cwd));
+        if (resolve_path(dirfd, cwd, path) != 0) {
           return 1;
         }
 
@@ -413,7 +420,9 @@ int main(int argc, char **argv) {
           perror("read_child_string");
           return 1;
         }
-        if (resolve_path(pid, dirfd, path) != 0) {
+        char cwd[4096];
+        proc_cwd(pid, dirfd, cwd, sizeof(cwd));
+        if (resolve_path(dirfd, cwd, path) != 0) {
           return 1;
         }
 
@@ -484,3 +493,23 @@ int main(int argc, char **argv) {
     }
   }
 }
+
+#else
+int main(int argc, char **argv) {
+  char tests[][3][100] = {
+      {"/tmp", ".", "/tmp"},
+      {"/tmp", "./", "/tmp"},
+      {"/tmp", "..", "/"},
+      {"/tmp", "./abc/", "/tmp/abc"},
+  };
+
+  for (int i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {
+    char *cwd = tests[i][0];
+    char *path = tests[i][1];
+    char *want = tests[i][2];
+    assert(resolve_path(AT_FDCWD, cwd, path) == 0);
+    printf("want: %s\ngot: %s\n", want, path);
+    assert(strcmp(path, want) == 0);
+  }
+}
+#endif

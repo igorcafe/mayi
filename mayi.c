@@ -324,6 +324,8 @@ int main(int argc, char **argv) {
         } else {
           dirfd = (int)(int32_t)req.data.args[0];
           raw_path = (void *)req.data.args[1];
+
+          // FIXME: openat2 uses open_how struct instead of int flags
           flags = (int)req.data.args[2];
         }
 

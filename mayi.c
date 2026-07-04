@@ -258,7 +258,12 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (getenv("HOME")) {
+  if (getenv("MAYI_CONFIG")) {
+    FILE *file = fopen(getenv("MAYI_CONFIG"), "r");
+    if (file) {
+      parse_config(file);
+    }
+  } else if (getenv("HOME")) {
     char path[300];
     snprintf(path, sizeof(path), "%s/.config/mayi.ini", getenv("HOME"));
     FILE *file = fopen(path, "r");

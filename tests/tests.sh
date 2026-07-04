@@ -4,6 +4,12 @@ set -euo pipefail
 
 rm -rf tmp
 mkdir -p tmp
+export MAYI_CONFIG="$PWD/tmp/mayi.ini"
+echo '\
+[*]
+/nix/store/* = read
+/run/current-system/* = read
+' > "$MAYI_CONFIG"
 
 test () {
     msg="$1"

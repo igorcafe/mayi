@@ -2,9 +2,9 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path"
@@ -17,21 +17,21 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type seccompData struct {
+type SeccompData struct {
 	Nr   int32
 	Arch uint32
 	IP   uint64
 	Args [6]uint64
 }
 
-type seccompNotif struct {
+type SeccompNotif struct {
 	ID    uint64
 	Pid   uint32
 	Flags uint32
-	Data  seccompData
+	Data  SeccompData
 }
 
-type seccompNotifResp struct {
+type SeccompNotifResp struct {
 	ID    uint64
 	Val   int64
 	Error int32
@@ -45,93 +45,30 @@ func main() {
 		os.Exit(1)
 	}
 
-	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
-
 	if os.Args[1] == "--child" {
-		fmt.Println("child!")
-		childSock := 3
-
-		bpfStmt := func(code uint16, k uint32) unix.SockFilter {
-			return unix.SockFilter{
-				Code: code,
-				K:    k,
-			}
-		}
-
-		bpfJump := func(code uint16, k uint32, jt, jf uint8) unix.SockFilter {
-			return unix.SockFilter{
-				Code: code,
-				Jt:   jt,
-				Jf:   jf,
-				K:    k,
-			}
-		}
-
-		filter := []unix.SockFilter{
-			bpfStmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 0),
-
-			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPEN, 0, 1),
-			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
-
-			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_CREAT, 0, 1),
-			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
-
-			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPENAT, 0, 1),
-			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
-
-			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPENAT2, 0, 1),
-			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
-
-			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_UNLINK, 0, 1),
-			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
-
-			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_UNLINKAT, 0, 1),
-			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
-
-			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW),
-		}
-
-		prog := unix.SockFprog{
-			Len:    uint16(len(filter)),
-			Filter: &filter[0],
-		}
-
-		r1, _, syserr := unix.Syscall(
-			unix.SYS_SECCOMP,
-			unix.SECCOMP_SET_MODE_FILTER,
-			unix.SECCOMP_FILTER_FLAG_NEW_LISTENER,
-			uintptr(unsafe.Pointer(&prog)),
-		)
-		fd := int(r1)
-		if syserr != 0 {
-			panic(syserr)
-		}
-
-		if err := SendFD(childSock, fd); err != nil {
-			panic(err)
-		}
-
-		arg, err := exec.LookPath(os.Args[2])
-		if err != nil {
-			panic(err)
-		}
-
-		err = unix.Exec(arg, os.Args[2:], os.Environ())
-		if err != nil {
-			panic(err)
-		}
-
-		return
+		err := runChild(context.Background())
+		panic(err)
 	}
 
-	err = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
 	if err != nil {
 		panic(err)
 	}
 
 	parentSock := sockets[0]
-	_ = parentSock
 	childSock := sockets[1]
+
+	err = runParent(context.Background(), childSock, parentSock)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func runParent(ctx context.Context, childSock, parentSock int) error {
+	err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+	if err != nil {
+		return err
+	}
 
 	pid, err := syscall.ForkExec(
 		"/proc/self/exe",
@@ -147,23 +84,22 @@ func main() {
 		},
 	)
 	if err != nil {
-		panic(err)
+		return err
 	}
-	_ = pid
 
 	err = unix.Close(childSock)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	fd, err := RecvFD(parentSock)
 	if err != nil {
-		panic(err)
+		return err
 	}
 
 	for {
-		req := seccompNotif{}
-		resp := seccompNotifResp{}
+		req := SeccompNotif{}
+		resp := SeccompNotifResp{}
 
 		_, _, errno := unix.Syscall(
 			unix.SYS_IOCTL,
@@ -171,12 +107,15 @@ func main() {
 			unix.SECCOMP_IOCTL_NOTIF_RECV,
 			uintptr(unsafe.Pointer(&req)),
 		)
+		if errno == unix.ENOENT {
+			break
+		}
 		if errno != 0 {
-			log.Print(errno)
-			return
+
+			fmt.Printf("%d: %s\n", errno, errno)
+			return errno
 		}
 
-		fmt.Println("notif recv")
 		resp.ID = req.ID
 		resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 
@@ -190,6 +129,91 @@ func main() {
 			panic(errno)
 		}
 	}
+
+	var status unix.WaitStatus
+	_, err = unix.Wait4(pid, &status, 0, nil)
+	if err != nil {
+		return err
+	}
+
+	if status.Exited() {
+		fmt.Println(status.ExitStatus())
+	}
+
+	return nil
+}
+
+func runChild(ctx context.Context) error {
+	var err error
+	childSock := 3
+
+	bpfStmt := func(code uint16, k uint32) unix.SockFilter {
+		return unix.SockFilter{
+			Code: code,
+			K:    k,
+		}
+	}
+
+	bpfJump := func(code uint16, k uint32, jt, jf uint8) unix.SockFilter {
+		return unix.SockFilter{
+			Code: code,
+			Jt:   jt,
+			Jf:   jf,
+			K:    k,
+		}
+	}
+
+	filter := []unix.SockFilter{
+		bpfStmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 0),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPEN, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_CREAT, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPENAT, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPENAT2, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_UNLINK, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_UNLINKAT, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW),
+	}
+
+	prog := unix.SockFprog{
+		Len:    uint16(len(filter)),
+		Filter: &filter[0],
+	}
+
+	r1, _, syserr := unix.Syscall(
+		unix.SYS_SECCOMP,
+		unix.SECCOMP_SET_MODE_FILTER,
+		unix.SECCOMP_FILTER_FLAG_NEW_LISTENER,
+		uintptr(unsafe.Pointer(&prog)),
+	)
+	fd := int(r1)
+	if syserr != 0 {
+		return syserr
+	}
+
+	if err := SendFD(childSock, fd); err != nil {
+		return err
+	}
+
+	arg, err := exec.LookPath(os.Args[2])
+	if err != nil {
+		return err
+	}
+
+	err = unix.Exec(arg, os.Args[2:], os.Environ())
+	return err
 }
 
 func ProcessCWD(pid, dirfd int) (string, error) {

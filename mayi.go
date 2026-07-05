@@ -3,11 +3,13 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
-	"path"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -48,6 +50,14 @@ func main() {
 	if os.Args[1] == "--child" {
 		err := runChild(context.Background())
 		panic(err)
+	}
+
+	log.SetOutput(io.Discard)
+
+	if os.Args[1] == "-v" {
+		log.SetFlags(0)
+		log.SetOutput(os.Stderr)
+		os.Args = append(os.Args[:1], os.Args[2:]...)
 	}
 
 	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
@@ -97,10 +107,22 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		return err
 	}
 
+	var configs []Config
+
+	file, err := os.Open("/home/igor/.config/mayi.ini")
+	if err == nil {
+		defer file.Close()
+		configs, err = ParseConfig(file)
+		// fmt.Printf("%+#v\n", configs)
+		if err != nil {
+			return err
+		}
+	}
+
+	stdin := bufio.NewScanner(os.Stdin)
+
 	for {
 		req := SeccompNotif{}
-		resp := SeccompNotifResp{}
-
 		_, _, errno := unix.Syscall(
 			unix.SYS_IOCTL,
 			uintptr(fd),
@@ -111,13 +133,63 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			break
 		}
 		if errno != 0 {
-
 			fmt.Printf("%d: %s\n", errno, errno)
 			return errno
 		}
 
-		resp.ID = req.ID
-		resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+		resp := SeccompNotifResp{
+			ID:    req.ID,
+			Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE,
+		}
+
+		if req.Data.Nr == unix.SYS_OPENAT {
+			_ = configs
+			// fmt.Println("SYSCALL: openat")
+			dirfd := int(int32(req.Data.Args[0]))
+			addr := uintptr(req.Data.Args[1])
+			flags := int(req.Data.Args[2])
+			_ = flags
+			path, err := readProcessString(pid, addr)
+			if err != nil {
+				return err
+			}
+			path, err = resolveProcessPath(pid, dirfd, path)
+			if err != nil {
+				return err
+			}
+			// fmt.Printf("DIRFD: %d\n", dirfd)
+			// fmt.Printf("PATH: %s\n", path)
+			// fmt.Printf("FLAGS: %08X\n", flags)
+
+			intent := Intent{
+				Program: os.Args[1],
+				Path:    path,
+				Read:    true,
+				Write:   false,
+			}
+			conf, _ := FindConfigMatch(configs, intent)
+			// fmt.Printf("conf: %+#v\n", conf)
+			perm := conf.PermForIntent(intent)
+
+			if perm == PermDeny {
+				fmt.Fprintln(os.Stderr, "[mayi]: Permission denied for", path)
+				resp.Flags = 0
+				resp.Error = -int32(unix.EACCES)
+			} else if perm == PermAsk {
+				fmt.Fprint(os.Stderr, "[mayi]: May I read your "+path+"?\n[Y/n]: ")
+				if !stdin.Scan() {
+					resp.Flags = 0
+					resp.Error = -int32(unix.EACCES)
+				}
+				if strings.ContainsAny(stdin.Text(), "Nn") {
+					resp.Flags = 0
+					resp.Error = -int32(unix.EACCES)
+				}
+			} else {
+				log.Printf("[mayi]: Permission auto allowed for %s\nPattern: %s", path, conf.Pattern.String())
+			}
+
+		}
 
 		_, _, errno = unix.Syscall(
 			unix.SYS_IOCTL,
@@ -126,9 +198,26 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			uintptr(unsafe.Pointer(&resp)),
 		)
 		if errno != 0 {
-			panic(errno)
+			return errno
 		}
 	}
+
+	// cwd, err := ProcessCWD(pid, unix.AT_FDCWD)
+	// if err != nil {
+	// 	return err
+	// }
+	// _ = cwd
+
+	// fmt.Println("cwd", cwd)
+
+	// conf, found := FindConfigMatch(configs, Intent{
+	// 	Program: "emacs",
+	// 	Path:    "/home/igor/.ssh",
+	// 	Read:    true,
+	// 	Write:   false,
+	// })
+
+	// fmt.Printf("%v - %+#v\n", found, conf)
 
 	var status unix.WaitStatus
 	_, err = unix.Wait4(pid, &status, 0, nil)
@@ -137,10 +226,61 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 
 	if status.Exited() {
-		fmt.Println(status.ExitStatus())
+		fmt.Println("exited with status", status.ExitStatus())
 	}
 
 	return nil
+}
+
+func resolveProcessPath(pid int, dirfd int, path string) (string, error) {
+	path = regexp.MustCompile(`/{2,}`).ReplaceAllString(path, "/")
+	if path[0] == '/' {
+		return path, nil
+	}
+
+	var cwd string
+	var err error
+
+	if dirfd == unix.AT_FDCWD {
+		cwd, err = os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
+	} else {
+		cwd, err = os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", pid, dirfd))
+	}
+
+	return filepath.Join(cwd, path), err
+}
+
+func readProcessString(pid int, addr uintptr) (string, error) {
+	buf := make([]byte, 1024)
+	local := []unix.Iovec{
+		{
+			Base: &buf[0],
+			Len:  uint64(len(buf)),
+		},
+	}
+
+	remote := []unix.RemoteIovec{
+		{
+			Base: addr,
+			Len:  len(buf),
+		},
+	}
+
+	n, err := unix.ProcessVMReadv(pid, local, remote, 0)
+	if err != nil {
+		return "", err
+	}
+
+	if n < 0 {
+		return "", errors.New("couldn't read process memory")
+	}
+
+	n = slices.Index(buf, 0)
+	if n < 0 {
+		return "", errors.New("didn't read a null terminated string")
+	}
+
+	return unsafe.String(&buf[0], n), nil
 }
 
 func runChild(ctx context.Context) error {
@@ -241,7 +381,7 @@ type Intent struct {
 
 type Config struct {
 	Program string
-	Pattern string
+	Pattern *regexp.Regexp
 	Read    Perm
 	Write   Perm
 }
@@ -270,14 +410,16 @@ func ParseConfig(r io.Reader) ([]Config, error) {
 	var program string
 
 	for scanner.Scan() {
-		text := strings.TrimSpace(scanner.Text())
+		line := scanner.Text()
+		line, _, _ = strings.Cut(line, "#")
+		line = strings.TrimSpace(line)
 
-		if strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]") {
-			program = text[1 : len(text)-1]
+		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
+			program = line[1 : len(line)-1]
 			continue
 		}
 
-		chunks := strings.Split(text, "=")
+		chunks := strings.Split(line, "=")
 		if len(chunks) != 2 {
 			continue
 		}
@@ -295,7 +437,11 @@ func ParseConfig(r io.Reader) ([]Config, error) {
 			return env
 		})
 
-		conf.Pattern = key
+		var err error
+		conf.Pattern, err = regexp.Compile("^" + key + "$")
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "[mayi] ignoring invalid regexp:", line)
+		}
 		conf.Program = program
 
 		val := strings.TrimSpace(chunks[1])
@@ -316,6 +462,11 @@ func ParseConfig(r io.Reader) ([]Config, error) {
 			conf.Read = PermAllow
 		}
 
+		if strings.Contains(val, "deny") && conf.Read != PermDeny && conf.Write != PermDeny {
+			conf.Read = PermDeny
+			conf.Write = PermDeny
+		}
+
 		configs = append(configs, conf)
 	}
 
@@ -327,7 +478,7 @@ func FindConfigMatch(configs []Config, intent Intent) (Config, bool) {
 		if intent.Program != conf.Program && conf.Program != "*" {
 			continue
 		}
-		if match, _ := path.Match(conf.Pattern, intent.Path); !match {
+		if !conf.Pattern.MatchString(intent.Path) {
 			continue
 		}
 		return conf, true
@@ -335,7 +486,7 @@ func FindConfigMatch(configs []Config, intent Intent) (Config, bool) {
 
 	return Config{
 		Program: intent.Program,
-		Pattern: "*",
+		Pattern: regexp.MustCompile(".*"),
 		Read:    PermAsk,
 		Write:   PermAsk,
 	}, false

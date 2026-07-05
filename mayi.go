@@ -4,15 +4,39 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"log"
 	"os"
+	"os/exec"
 	"path"
 	"regexp"
 	"slices"
 	"strings"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+type seccompData struct {
+	Nr   int32
+	Arch uint32
+	IP   uint64
+	Args [6]uint64
+}
+
+type seccompNotif struct {
+	ID    uint64
+	Pid   uint32
+	Flags uint32
+	Data  seccompData
+}
+
+type seccompNotifResp struct {
+	ID    uint64
+	Val   int64
+	Error int32
+	Flags uint32
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -26,22 +50,92 @@ func main() {
 	if os.Args[1] == "--child" {
 		fmt.Println("child!")
 		childSock := 3
-		_, err = unix.Write(childSock, []byte("hi"))
+
+		bpfStmt := func(code uint16, k uint32) unix.SockFilter {
+			return unix.SockFilter{
+				Code: code,
+				K:    k,
+			}
+		}
+
+		bpfJump := func(code uint16, k uint32, jt, jf uint8) unix.SockFilter {
+			return unix.SockFilter{
+				Code: code,
+				Jt:   jt,
+				Jf:   jf,
+				K:    k,
+			}
+		}
+
+		filter := []unix.SockFilter{
+			bpfStmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 0),
+
+			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPEN, 0, 1),
+			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_CREAT, 0, 1),
+			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPENAT, 0, 1),
+			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPENAT2, 0, 1),
+			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_UNLINK, 0, 1),
+			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+			bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_UNLINKAT, 0, 1),
+			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+			bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW),
+		}
+
+		prog := unix.SockFprog{
+			Len:    uint16(len(filter)),
+			Filter: &filter[0],
+		}
+
+		r1, _, syserr := unix.Syscall(
+			unix.SYS_SECCOMP,
+			unix.SECCOMP_SET_MODE_FILTER,
+			unix.SECCOMP_FILTER_FLAG_NEW_LISTENER,
+			uintptr(unsafe.Pointer(&prog)),
+		)
+		fd := int(r1)
+		if syserr != 0 {
+			panic(syserr)
+		}
+
+		if err := SendFD(childSock, fd); err != nil {
+			panic(err)
+		}
+
+		arg, err := exec.LookPath(os.Args[2])
 		if err != nil {
 			panic(err)
 		}
 
-		for {
+		err = unix.Exec(arg, os.Args[2:], os.Environ())
+		if err != nil {
+			panic(err)
 		}
+
 		return
 	}
 
+	err = unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
+	if err != nil {
+		panic(err)
+	}
+
 	parentSock := sockets[0]
+	_ = parentSock
 	childSock := sockets[1]
 
 	pid, err := syscall.ForkExec(
 		"/proc/self/exe",
-		append([]string{"/proc/self/exe", "--child"}, os.Args[2:]...),
+		append([]string{"/proc/self/exe", "--child"}, os.Args[1:]...),
 		&syscall.ProcAttr{
 			Env: os.Environ(),
 			Files: []uintptr{
@@ -55,46 +149,47 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	_ = pid
 
 	err = unix.Close(childSock)
 	if err != nil {
 		panic(err)
 	}
 
-	buf := make([]byte, 10)
-	_, err = unix.Read(parentSock, buf)
-	if err != nil {
-		panic(err)
-	}
-	fmt.Println("recv:", string(buf))
-
-	cwd, err := ProcessCWD(pid, unix.AT_FDCWD)
+	fd, err := RecvFD(parentSock)
 	if err != nil {
 		panic(err)
 	}
 
-	fmt.Println("cwd", cwd)
+	for {
+		req := seccompNotif{}
+		resp := seccompNotifResp{}
 
-	var configs []Config
+		_, _, errno := unix.Syscall(
+			unix.SYS_IOCTL,
+			uintptr(fd),
+			unix.SECCOMP_IOCTL_NOTIF_RECV,
+			uintptr(unsafe.Pointer(&req)),
+		)
+		if errno != 0 {
+			log.Print(errno)
+			return
+		}
 
-	file, err := os.Open("/home/igor/.config/mayi.ini")
-	if err == nil {
-		defer file.Close()
-		configs, err = ParseConfig(file)
-		// fmt.Printf("%+#v\n", configs)
-		if err != nil {
-			panic(err)
+		fmt.Println("notif recv")
+		resp.ID = req.ID
+		resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+
+		_, _, errno = unix.Syscall(
+			unix.SYS_IOCTL,
+			uintptr(fd),
+			unix.SECCOMP_IOCTL_NOTIF_SEND,
+			uintptr(unsafe.Pointer(&resp)),
+		)
+		if errno != 0 {
+			panic(errno)
 		}
 	}
-
-	conf, found := FindConfigMatch(configs, Intent{
-		Program: "emacs",
-		Path:    "/home/igor/.ssh",
-		Read:    true,
-		Write:   false,
-	})
-
-	fmt.Printf("%v - %+#v\n", found, conf)
 }
 
 func ProcessCWD(pid, dirfd int) (string, error) {
@@ -220,4 +315,36 @@ func FindConfigMatch(configs []Config, intent Intent) (Config, bool) {
 		Read:    PermAsk,
 		Write:   PermAsk,
 	}, false
+}
+
+func SendFD(sock int, fd int) error {
+	rights := unix.UnixRights(fd)
+	return unix.Sendmsg(sock, []byte{0}, rights, nil, 0)
+}
+
+func RecvFD(sock int) (int, error) {
+	buf := make([]byte, 1)
+	oob := make([]byte, unix.CmsgSpace(4))
+
+	_, oobn, _, _, err := unix.Recvmsg(sock, buf, oob, 0)
+	if err != nil {
+		return -1, err
+	}
+
+	msgs, err := unix.ParseSocketControlMessage(oob[:oobn])
+	if err != nil {
+		return -1, err
+	}
+
+	for _, msg := range msgs {
+		fds, err := unix.ParseUnixRights(&msg)
+		if err != nil {
+			return -1, err
+		}
+		if len(fds) > 0 {
+			return fds[0], nil
+		}
+	}
+
+	return -1, fmt.Errorf("no fd received")
 }

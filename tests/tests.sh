@@ -91,3 +91,27 @@ test 'rm -r disallowed keeps directory' '[ -d tmp/delete-rm-r ]'
 test 'rm -r disallowed keeps file' '[ -e tmp/delete-rm-r/file ]'
 test 'rm -r allowed' 'printf "\n\n\n" | ./tmp/mayi rm -r tmp/delete-rm-r'
 test 'rm -r allowed deletes directory' '[ ! -e tmp/delete-rm-r ]'
+
+printf '' > tmp/rename-old
+test 'rename disallowed' '! echo "n" | ./tmp/mayi ./tmp/syscall rename tmp/rename-old tmp/rename-new'
+test 'rename disallowed keeps old path' '[ -e tmp/rename-old ]'
+test 'rename disallowed keeps new path missing' '[ ! -e tmp/rename-new ]'
+test 'rename allowed' 'echo "" | ./tmp/mayi ./tmp/syscall rename tmp/rename-old tmp/rename-new'
+test 'rename allowed removes old path' '[ ! -e tmp/rename-old ]'
+test 'rename allowed creates new path' '[ -e tmp/rename-new ]'
+
+printf '' > tmp/renameat-old
+test 'renameat disallowed' '! echo "n" | ./tmp/mayi ./tmp/syscall renameat tmp/renameat-old tmp/renameat-new'
+test 'renameat disallowed keeps old path' '[ -e tmp/renameat-old ]'
+test 'renameat disallowed keeps new path missing' '[ ! -e tmp/renameat-new ]'
+test 'renameat allowed' 'echo "" | ./tmp/mayi ./tmp/syscall renameat tmp/renameat-old tmp/renameat-new'
+test 'renameat allowed removes old path' '[ ! -e tmp/renameat-old ]'
+test 'renameat allowed creates new path' '[ -e tmp/renameat-new ]'
+
+printf '' > tmp/renameat2-old
+test 'renameat2 disallowed' '! echo "n" | ./tmp/mayi ./tmp/syscall renameat2 tmp/renameat2-old tmp/renameat2-new'
+test 'renameat2 disallowed keeps old path' '[ -e tmp/renameat2-old ]'
+test 'renameat2 disallowed keeps new path missing' '[ ! -e tmp/renameat2-new ]'
+test 'renameat2 allowed' 'echo "" | ./tmp/mayi ./tmp/syscall renameat2 tmp/renameat2-old tmp/renameat2-new'
+test 'renameat2 allowed removes old path' '[ ! -e tmp/renameat2-old ]'
+test 'renameat2 allowed creates new path' '[ -e tmp/renameat2-new ]'

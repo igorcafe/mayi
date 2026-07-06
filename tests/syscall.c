@@ -9,6 +9,7 @@
 
 static void usage(char *program) {
   fprintf(stderr, "usage: %s {open|creat|openat|openat2|unlink|unlinkat} PATH [FLAGS]\n", program);
+  fprintf(stderr, "       %s {rename|renameat|renameat2} OLD_PATH NEW_PATH\n", program);
   fprintf(stderr, "flags: r, w, rw, c=create, t=truncate, a=append, x=exclusive, d=directory\n");
 }
 
@@ -75,8 +76,16 @@ int main(int argc, char **argv) {
   int flags = 0;
   int fd = -1;
 
+  if ((strcmp(name, "rename") == 0 || strcmp(name, "renameat") == 0 ||
+       strcmp(name, "renameat2") == 0) && argc != 4) {
+    usage(argv[0]);
+    return 2;
+  }
+
   if (strcmp(name, "creat") != 0 && strcmp(name, "unlink") != 0 &&
-      strcmp(name, "unlinkat") != 0 && parse_flags(flag_string, &flags) < 0) {
+      strcmp(name, "unlinkat") != 0 && strcmp(name, "rename") != 0 &&
+      strcmp(name, "renameat") != 0 && strcmp(name, "renameat2") != 0 &&
+      parse_flags(flag_string, &flags) < 0) {
     perror("flags");
     return 2;
   }
@@ -98,6 +107,12 @@ int main(int argc, char **argv) {
     return syscall(SYS_unlink, path) == 0 ? 0 : (perror(name), 1);
   } else if (strcmp(name, "unlinkat") == 0) {
     return syscall(SYS_unlinkat, AT_FDCWD, path, 0) == 0 ? 0 : (perror(name), 1);
+  } else if (strcmp(name, "rename") == 0) {
+    return syscall(SYS_rename, path, argv[3]) == 0 ? 0 : (perror(name), 1);
+  } else if (strcmp(name, "renameat") == 0) {
+    return syscall(SYS_renameat, AT_FDCWD, path, AT_FDCWD, argv[3]) == 0 ? 0 : (perror(name), 1);
+  } else if (strcmp(name, "renameat2") == 0) {
+    return syscall(SYS_renameat2, AT_FDCWD, path, AT_FDCWD, argv[3], 0) == 0 ? 0 : (perror(name), 1);
   } else {
     usage(argv[0]);
     return 2;

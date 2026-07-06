@@ -360,7 +360,7 @@ func handleSyscallRename(stdin *bufio.Scanner, pid int, req SeccompNotif, config
 	switch req.Data.Nr {
 	case unix.SYS_RENAME:
 		rawOldPath = uintptr(req.Data.Args[0])
-		rawOldPath = uintptr(req.Data.Args[1])
+		rawNewPath = uintptr(req.Data.Args[1])
 	case unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
 		oldDirfd = int(int32(req.Data.Args[0]))
 		rawOldPath = uintptr(req.Data.Args[1])

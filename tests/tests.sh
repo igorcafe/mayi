@@ -7,8 +7,10 @@ mkdir -p tmp
 export MAYI_CONFIG="$PWD/tmp/mayi.ini"
 echo '\
 [*]
+/dev/tty = read write
 /nix/store/.* = read
 /run/current-system/.* = read
+$PWD/repeat.sh = read
 ' > "$MAYI_CONFIG"
 
 test () {
@@ -115,3 +117,7 @@ test 'renameat2 disallowed keeps new path missing' '[ ! -e tmp/renameat2-new ]'
 test 'renameat2 allowed' 'echo "" | ./tmp/mayi ./tmp/syscall renameat2 tmp/renameat2-old tmp/renameat2-new'
 test 'renameat2 allowed removes old path' '[ ! -e tmp/renameat2-old ]'
 test 'renameat2 allowed creates new path' '[ -e tmp/renameat2-new ]'
+
+echo "content" > ./tmp/content
+
+test 'remembers allowed action' 'echo "Y" | timeout 1 ./tmp/mayi ./repeat.sh 3 cat ./tmp/content'

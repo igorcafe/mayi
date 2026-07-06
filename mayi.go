@@ -118,7 +118,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 
 	if configPath != "" {
-		fmt.Fprintf(os.Stderr, "loading config from: %s\n", configPath)
+		log.Printf("loading config from: %s\n", configPath)
 		file, err := os.Open(configPath)
 		if err == nil {
 			defer file.Close()

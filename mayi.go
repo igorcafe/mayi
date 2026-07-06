@@ -179,6 +179,24 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 				resp = respDeny
 			} else {
 				resp = respAllow
+				for _, action := range intent.Actions {
+					read := PermAsk
+					if action.Read {
+						read = PermAllow
+					}
+
+					write := PermAsk
+					if action.Write {
+						write = PermAllow
+					}
+
+					configs = append(configs, Config{
+						Program: intent.Program,
+						Pattern: regexp.MustCompile("^" + regexp.QuoteMeta(action.Path) + "$"),
+						Read:    read,
+						Write:   write,
+					})
+				}
 			}
 		} else {
 			resp = respAllow

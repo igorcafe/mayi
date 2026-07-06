@@ -7,10 +7,10 @@
 Intercepting open system calls:
 
 ```shell
-$ mayi cat ../../.ssh/id_rsa                 
-May I read '/home/igor/.ssh/id_rsa'?
+$ mayi bash steal_ssh.sh
+May I read your '/home/igor/.ssh/id_rsa'?
 [Y/n]: n
-cat: ../../.ssh/id_rsa: Permission denied
+cat: /home/igor/.ssh/id_rsa: Permission denied
 ```
 
 Intercepting rename system calls:
@@ -28,6 +28,30 @@ $ mayi rm yourfile
 May I delete your '/home/igor/Git/mayi/yourfile'?
 [Y/n]: n
 rm: cannot remove 'yourfile': Permission denied
+```
+
+Config example:
+```ini
+[*] # global config
+/etc/.* = read write
+/run/.* = read write
+/var/.* = read write
+/usr/.* = read write
+/lib.* = read write
+/bin/.* = read write
+/tmp/.* = read write
+/run/.* = read write
+/proc/.* = read write
+/sys/.* = read write
+/dev/.* = read write
+
+[emacs] # per program config
+
+# env variables works too
+$PWD/.* = read write
+$HOME = read
+$HOME/.gitconfig = read
+$HOME/\.emacs.* = read write
 ```
 
 ## Status

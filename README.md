@@ -17,17 +17,46 @@ This project is currently a proof of concept and **I'm NOT a security researcher
 ### Handled system calls
 
 - `open`, `creat`, `openat`, `openat2`
+
+Can open files in read and/or write mode. Can even truncate them.
+
 - `unlink`, `unlinkat`
+
+Deletes files.
+
 - `rename`, `renameat`, `renameat2`
+
+Renames and/or moves files, but can also replace them.
 
 ### TO-DO
 
 - `truncate`, `ftruncate`
+
+Can erase the file content.
+
 - `chmod`, `fchmod`, `fchmodat`
+
+Changes file permissions.
+
 - `chown`, `fchown`, `lchown`, `fchownat`
+
+Changes file owner.
+
 - `link`, `linkat`, `symlink`, `symlinkat`
+
+Dangerous, because a hard link or a symlink can change the contents of a real file somewhere else.
+The proper solution may be to always follow the links on open/truncate and similar operations.
+
 - `mkdir`, `mkdirat`
+
+Creates directory.
+Maybe not so important to handle?
+
 - `mknod`, `mknodat`
+
+Can create regular files, devices, named pipes...
+Maybe not so important to handle?
+
 
 ### Not planned
 

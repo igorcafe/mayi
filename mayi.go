@@ -20,27 +20,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type SeccompData struct {
-	Nr   int32
-	Arch uint32
-	IP   uint64
-	Args [6]uint64
-}
-
-type SeccompNotif struct {
-	ID    uint64
-	Pid   uint32
-	Flags uint32
-	Data  SeccompData
-}
-
-type SeccompNotifResp struct {
-	ID    uint64
-	Val   int64
-	Error int32
-	Flags uint32
-}
-
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "args: ", os.Args)
@@ -75,6 +54,27 @@ func main() {
 	}
 }
 
+type SeccompData struct {
+	Nr   int32
+	Arch uint32
+	IP   uint64
+	Args [6]uint64
+}
+
+type SeccompNotif struct {
+	ID    uint64
+	Pid   uint32
+	Flags uint32
+	Data  SeccompData
+}
+
+type SeccompNotifResp struct {
+	ID    uint64
+	Val   int64
+	Error int32
+	Flags uint32
+}
+
 func runParent(ctx context.Context, childSock, parentSock int) error {
 	err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 	if err != nil {
@@ -103,7 +103,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		return err
 	}
 
-	fd, err := RecvFD(parentSock)
+	fd, err := recvFD(parentSock)
 	if err != nil {
 		return err
 	}
@@ -118,10 +118,11 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 
 	if configPath != "" {
+		fmt.Fprintf(os.Stderr, "loading config from: %s\n", configPath)
 		file, err := os.Open(configPath)
 		if err == nil {
 			defer file.Close()
-			configs, err = ParseConfig(file)
+			configs, err = parseConfig(file)
 			// fmt.Printf("%+#v\n", configs)
 			if err != nil {
 				return err
@@ -147,27 +148,40 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			return errno
 		}
 
-		resp := SeccompNotifResp{
+		respDeny := SeccompNotifResp{
+			ID:    req.ID,
+			Error: -int32(unix.EACCES),
+		}
+
+		respAllow := SeccompNotifResp{
 			ID:    req.ID,
 			Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE,
 		}
 
-		switch req.Data.Nr {
-		case unix.SYS_OPEN, unix.SYS_CREAT, unix.SYS_OPENAT, unix.SYS_OPENAT2:
-			resp, err = handleSyscallOpen(stdin, req, configs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "open(%d): %v\n", req.Data.Nr, err)
+		resp := respDeny
+
+		intent, err := parseSyscallIntent(req, configs)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "rename(%d): %v\n", req.Data.Nr, err)
+			return err
+		}
+
+		perm := permForIntent(configs, intent)
+
+		if perm == PermDeny {
+			fmt.Fprintln(os.Stderr, "Permission denied for", intent.Actions[0].Path, intent.Actions[1].Path)
+			resp = respDeny
+		} else if perm == PermAsk {
+			fmt.Fprintf(os.Stderr, "%s\n[Y/n]: ", intent.Prompt)
+			if !stdin.Scan() {
+				resp = respDeny
+			} else if strings.ContainsAny(stdin.Text(), "Nn") {
+				resp = respDeny
+			} else {
+				resp = respAllow
 			}
-		case unix.SYS_UNLINK, unix.SYS_UNLINKAT:
-			resp, err = handleSyscallUnlink(stdin, req, configs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "unlink(%d): %v\n", req.Data.Nr, err)
-			}
-		case unix.SYS_RENAME, unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
-			resp, err = handleSyscallRename(stdin, req, configs)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "rename(%d): %v\n", req.Data.Nr, err)
-			}
+		} else {
+			resp = respAllow
 		}
 
 		_, _, errno = unix.Syscall(
@@ -202,231 +216,168 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	return nil
 }
 
-func handleSyscallOpen(stdin *bufio.Scanner, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
-	resp = SeccompNotifResp{
-		ID:    req.ID,
-		Flags: 0,
-		Error: -int32(unix.EACCES),
-	}
-
-	dirfd := unix.AT_FDCWD
-	rawPath := uintptr(0)
-	flags := unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC
+func parseSyscallIntent(req SeccompNotif, configs []Config) (Intent, error) {
+	var intent Intent
 
 	switch req.Data.Nr {
-	case unix.SYS_OPEN:
-		rawPath = uintptr(req.Data.Args[0])
-		flags = int(int32(req.Data.Args[1]))
-	case unix.SYS_CREAT:
-		rawPath = uintptr(req.Data.Args[0])
-	case unix.SYS_OPENAT:
-		dirfd = int(int32(req.Data.Args[0]))
-		rawPath = uintptr(req.Data.Args[1])
-		flags = int(int32(req.Data.Args[2]))
-	case unix.SYS_OPENAT2:
-		dirfd = int(int32(req.Data.Args[0]))
-		rawPath = uintptr(req.Data.Args[1])
-		// TODO: handle arg[2] open_how
-	default:
-		panic("wtf?")
-	}
+	case unix.SYS_OPEN, unix.SYS_CREAT, unix.SYS_OPENAT, unix.SYS_OPENAT2:
+		dirfd := unix.AT_FDCWD
+		rawPath := uintptr(0)
+		flags := unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC
 
-	path, err := readProcessString(int(req.Pid), rawPath)
-	if err != nil {
-		return
-	}
-
-	path, err = resolveProcessPath(int(req.Pid), dirfd, path)
-	if err != nil {
-		return
-	}
-
-	read := false
-	write := false
-
-	switch flags & unix.O_ACCMODE {
-	case unix.O_RDONLY:
-		read = true
-	case unix.O_WRONLY:
-		write = true
-	case unix.O_RDWR:
-		read = true
-		write = true
-	}
-
-	intent := Intent{
-		Program: os.Args[1],
-		Path:    path,
-		Read:    read,
-		Write:   write,
-	}
-	conf, _ := FindConfigMatch(configs, intent)
-	// fmt.Printf("conf: %+#v\n", conf)
-	perm := conf.PermForIntent(intent)
-
-	if perm == PermDeny {
-		fmt.Fprintln(os.Stderr, "Permission denied for", path)
-		resp.Flags = 0
-		resp.Error = -int32(unix.EACCES)
-		return
-	}
-	if perm == PermAsk {
-		fmt.Fprint(os.Stderr, "May I read your "+path+"?\n[Y/n]: ")
-		if !stdin.Scan() {
-			return
+		switch req.Data.Nr {
+		case unix.SYS_OPEN:
+			rawPath = uintptr(req.Data.Args[0])
+			flags = int(int32(req.Data.Args[1]))
+		case unix.SYS_CREAT:
+			rawPath = uintptr(req.Data.Args[0])
+		case unix.SYS_OPENAT:
+			dirfd = int(int32(req.Data.Args[0]))
+			rawPath = uintptr(req.Data.Args[1])
+			flags = int(int32(req.Data.Args[2]))
+		case unix.SYS_OPENAT2:
+			dirfd = int(int32(req.Data.Args[0]))
+			rawPath = uintptr(req.Data.Args[1])
+			// TODO: handle arg[2] open_how
+		default:
+			panic("wtf?")
 		}
-		if strings.ContainsAny(stdin.Text(), "Nn") {
-			return
+
+		path, err := readProcessString(int(req.Pid), rawPath)
+		if err != nil {
+			return intent, err
 		}
-	}
 
-	log.Printf("Permission auto allowed for %s\nPattern: %s", path, conf.Pattern.String())
-	resp.Error = 0
-	resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-	return
-
-}
-
-func handleSyscallUnlink(stdin *bufio.Scanner, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
-	resp = SeccompNotifResp{
-		ID:    req.ID,
-		Flags: 0,
-		Error: -int32(unix.EACCES),
-	}
-
-	dirfd := unix.AT_FDCWD
-	rawPath := uintptr(0)
-
-	switch req.Data.Nr {
-	case unix.SYS_UNLINK:
-		rawPath = uintptr(req.Data.Args[0])
-	case unix.SYS_UNLINKAT:
-		dirfd = int(int32(req.Data.Args[0]))
-		rawPath = uintptr(req.Data.Args[1])
-	}
-
-	path, err := readProcessString(int(req.Pid), rawPath)
-	if err != nil {
-		return
-	}
-
-	path, err = resolveProcessPath(int(req.Pid), dirfd, path)
-	if err != nil {
-		return
-	}
-
-	intent := Intent{
-		Program: os.Args[1],
-		Path:    path,
-		Read:    false,
-		Write:   true,
-	}
-	conf, _ := FindConfigMatch(configs, intent)
-	perm := conf.PermForIntent(intent)
-
-	if perm == PermDeny {
-		fmt.Fprintln(os.Stderr, "Permission denied for", path)
-		resp.Flags = 0
-		resp.Error = -int32(unix.EACCES)
-		return
-	}
-	if perm == PermAsk {
-		fmt.Fprint(os.Stderr, "May I delete your "+path+"?\n[Y/n]: ")
-		if !stdin.Scan() {
-			return
+		path, err = resolveProcessPath(int(req.Pid), dirfd, path)
+		if err != nil {
+			return intent, err
 		}
-		if strings.ContainsAny(stdin.Text(), "Nn") {
-			return
+
+		read := false
+		write := false
+		var prompt string
+
+		switch flags & unix.O_ACCMODE {
+		case unix.O_RDONLY:
+			read = true
+			prompt = fmt.Sprintf("May I read your '%s'?", path)
+		case unix.O_WRONLY:
+			write = true
+			prompt = fmt.Sprintf("May I write your '%s'?", path)
+		case unix.O_RDWR:
+			read = true
+			write = true
+			prompt = fmt.Sprintf("May I read AND write your '%s'?", path)
+		default:
+			// TODO:
+			read = true
+			write = true
+			prompt = fmt.Sprintf("May I potentially read AND write your '%s'?", path)
 		}
-	}
 
-	resp.Error = 0
-	resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-	return
-}
+		return Intent{
+			Program: os.Args[1],
+			Prompt:  prompt,
+			Actions: []Action{
+				{
+					Path:  path,
+					Read:  read,
+					Write: write,
+				},
+			},
+		}, nil
 
-func handleSyscallRename(stdin *bufio.Scanner, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
-	resp = SeccompNotifResp{
-		ID:    req.ID,
-		Flags: 0,
-		Error: -int32(unix.EACCES),
-	}
+	case unix.SYS_UNLINK, unix.SYS_UNLINKAT:
+		dirfd := unix.AT_FDCWD
+		rawPath := uintptr(0)
 
-	oldDirfd := unix.AT_FDCWD
-	newDirfd := unix.AT_FDCWD
-	rawOldPath := uintptr(0)
-	rawNewPath := uintptr(0)
-
-	switch req.Data.Nr {
-	case unix.SYS_RENAME:
-		rawOldPath = uintptr(req.Data.Args[0])
-		rawNewPath = uintptr(req.Data.Args[1])
-	case unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
-		oldDirfd = int(int32(req.Data.Args[0]))
-		rawOldPath = uintptr(req.Data.Args[1])
-		newDirfd = int(int32(req.Data.Args[2]))
-		rawNewPath = uintptr(req.Data.Args[3])
-		// TODO: args[4] in renameat2 is a set of flags, should i care?
-	}
-
-	oldPath, err := readProcessString(int(req.Pid), rawOldPath)
-	if err != nil {
-		return
-	}
-
-	oldPath, err = resolveProcessPath(int(req.Pid), oldDirfd, oldPath)
-	if err != nil {
-		return
-	}
-
-	newPath, err := readProcessString(int(req.Pid), rawNewPath)
-	if err != nil {
-		return
-	}
-
-	newPath, err = resolveProcessPath(int(req.Pid), newDirfd, newPath)
-	if err != nil {
-		return
-	}
-
-	intentOld := Intent{
-		Program: os.Args[1],
-		Path:    oldPath,
-		Read:    false,
-		Write:   true,
-	}
-	confOld, _ := FindConfigMatch(configs, intentOld)
-	permOld := confOld.PermForIntent(intentOld)
-
-	intentNew := Intent{
-		Program: os.Args[1],
-		Path:    newPath,
-		Read:    false,
-		Write:   true,
-	}
-	confNew, _ := FindConfigMatch(configs, intentNew)
-	permNew := confNew.PermForIntent(intentNew)
-
-	if permOld == PermDeny || permNew == PermDeny {
-		fmt.Fprintln(os.Stderr, "Permission denied for", oldPath)
-		resp.Flags = 0
-		resp.Error = -int32(unix.EACCES)
-		return
-	}
-
-	if permOld == PermAsk || permNew == PermAsk {
-		fmt.Fprintf(os.Stderr, "May I rename '%s' to '%s'?\n[Y/n]: ", oldPath, newPath)
-		if !stdin.Scan() {
-			return
+		switch req.Data.Nr {
+		case unix.SYS_UNLINK:
+			rawPath = uintptr(req.Data.Args[0])
+		case unix.SYS_UNLINKAT:
+			dirfd = int(int32(req.Data.Args[0]))
+			rawPath = uintptr(req.Data.Args[1])
 		}
-		if strings.ContainsAny(stdin.Text(), "Nn") {
-			return
+
+		path, err := readProcessString(int(req.Pid), rawPath)
+		if err != nil {
+			return intent, err
 		}
+
+		path, err = resolveProcessPath(int(req.Pid), dirfd, path)
+		if err != nil {
+			return intent, err
+		}
+
+		return Intent{
+			Program: os.Args[1],
+			Prompt:  fmt.Sprintf("May I delete your '%s'?", path),
+			Actions: []Action{
+				{
+					Path:  path,
+					Read:  false,
+					Write: true,
+				},
+			},
+		}, nil
+
+	case unix.SYS_RENAME, unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
+		oldDirfd := unix.AT_FDCWD
+		newDirfd := unix.AT_FDCWD
+		rawOldPath := uintptr(0)
+		rawNewPath := uintptr(0)
+
+		switch req.Data.Nr {
+		case unix.SYS_RENAME:
+			rawOldPath = uintptr(req.Data.Args[0])
+			rawNewPath = uintptr(req.Data.Args[1])
+		case unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
+			oldDirfd = int(int32(req.Data.Args[0]))
+			rawOldPath = uintptr(req.Data.Args[1])
+			newDirfd = int(int32(req.Data.Args[2]))
+			rawNewPath = uintptr(req.Data.Args[3])
+			// TODO: args[4] in renameat2 is a set of flags, should i care?
+		}
+
+		oldPath, err := readProcessString(int(req.Pid), rawOldPath)
+		if err != nil {
+			return intent, err
+		}
+
+		oldPath, err = resolveProcessPath(int(req.Pid), oldDirfd, oldPath)
+		if err != nil {
+			return intent, err
+		}
+
+		newPath, err := readProcessString(int(req.Pid), rawNewPath)
+		if err != nil {
+			return intent, err
+		}
+
+		newPath, err = resolveProcessPath(int(req.Pid), newDirfd, newPath)
+		if err != nil {
+			return intent, err
+		}
+
+		return Intent{
+			Program: os.Args[1],
+			Prompt:  fmt.Sprintf("May I move or rename '%s' to '%s'?", oldPath, newPath),
+			Actions: []Action{
+				{
+					Path:  oldPath,
+					Read:  false,
+					Write: true,
+				},
+				{
+					Path:  newPath,
+					Read:  false,
+					Write: true,
+				},
+			},
+		}, nil
 	}
 
-	resp.Error = 0
-	resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
-	return
+	return intent, errors.New("Syscall handling not implemented")
 }
 
 func resolveProcessPath(pid int, dirfd int, path string) (string, error) {
@@ -558,7 +509,7 @@ func runChild(ctx context.Context) error {
 		return syserr
 	}
 
-	if err := SendFD(childSock, fd); err != nil {
+	if err := sendFD(childSock, fd); err != nil {
 		return err
 	}
 
@@ -581,9 +532,14 @@ const (
 
 type Intent struct {
 	Program string
-	Path    string
-	Read    bool
-	Write   bool
+	Prompt  string
+	Actions []Action
+}
+
+type Action struct {
+	Path  string
+	Read  bool
+	Write bool
 }
 
 type Config struct {
@@ -593,25 +549,41 @@ type Config struct {
 	Write   Perm
 }
 
-func (c Config) PermForIntent(intent Intent) Perm {
-	if intent.Read && c.Read == PermDeny {
-		return PermDeny
-	}
-	if intent.Write && c.Write == PermDeny {
-		return PermDeny
+func permForIntent(configs []Config, intent Intent) Perm {
+	perm := PermAllow
+	found := false
+
+	for _, action := range intent.Actions {
+		for _, conf := range slices.Backward(configs) {
+			if intent.Program != conf.Program && conf.Program != "*" {
+				continue
+			}
+			if !conf.Pattern.MatchString(action.Path) {
+				continue
+			}
+
+			found = true
+
+			// if any action is denied, the whole operation is denied
+			if (action.Read && conf.Read == PermDeny) || (action.Write && conf.Write == PermDeny) {
+				return PermDeny
+			}
+
+			// otherwise, if any action requires asking, we should ask
+			if (action.Read && conf.Read == PermAsk) || (action.Write && conf.Write == PermAsk) {
+				perm = PermAsk
+			}
+		}
 	}
 
-	if intent.Read && c.Read == PermAsk {
-		return PermAsk
-	}
-	if intent.Write && c.Write == PermAsk {
+	if !found {
 		return PermAsk
 	}
 
-	return PermAllow
+	return perm
 }
 
-func ParseConfig(r io.Reader) ([]Config, error) {
+func parseConfig(r io.Reader) ([]Config, error) {
 	var configs []Config
 	scanner := bufio.NewScanner(r)
 	var program string
@@ -680,31 +652,12 @@ func ParseConfig(r io.Reader) ([]Config, error) {
 	return configs, scanner.Err()
 }
 
-func FindConfigMatch(configs []Config, intent Intent) (Config, bool) {
-	for _, conf := range slices.Backward(configs) {
-		if intent.Program != conf.Program && conf.Program != "*" {
-			continue
-		}
-		if !conf.Pattern.MatchString(intent.Path) {
-			continue
-		}
-		return conf, true
-	}
-
-	return Config{
-		Program: intent.Program,
-		Pattern: regexp.MustCompile(".*"),
-		Read:    PermAsk,
-		Write:   PermAsk,
-	}, false
-}
-
-func SendFD(sock int, fd int) error {
+func sendFD(sock int, fd int) error {
 	rights := unix.UnixRights(fd)
 	return unix.Sendmsg(sock, []byte{0}, rights, nil, 0)
 }
 
-func RecvFD(sock int) (int, error) {
+func recvFD(sock int) (int, error) {
 	buf := make([]byte, 1)
 	oob := make([]byte, unix.CmsgSpace(4))
 

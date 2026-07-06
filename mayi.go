@@ -55,7 +55,7 @@ func main() {
 	log.SetOutput(io.Discard)
 
 	if os.Args[1] == "-v" {
-		log.SetFlags(0)
+		log.SetFlags(log.Lshortfile)
 		log.SetOutput(os.Stderr)
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 	}
@@ -119,8 +119,6 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		}
 	}
 
-	stdin := bufio.NewScanner(os.Stdin)
-
 	for {
 		req := SeccompNotif{}
 		_, _, errno := unix.Syscall(
@@ -137,58 +135,13 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			return errno
 		}
 
-		resp := SeccompNotifResp{
-			ID:    req.ID,
-			Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE,
-		}
+		var resp SeccompNotifResp
 
 		if req.Data.Nr == unix.SYS_OPENAT {
-			_ = configs
-			// fmt.Println("SYSCALL: openat")
-			dirfd := int(int32(req.Data.Args[0]))
-			addr := uintptr(req.Data.Args[1])
-			flags := int(req.Data.Args[2])
-			_ = flags
-			path, err := readProcessString(pid, addr)
+			resp, err = handleSyscallOpen(pid, req, configs)
 			if err != nil {
-				return err
+				fmt.Print(err)
 			}
-			path, err = resolveProcessPath(pid, dirfd, path)
-			if err != nil {
-				return err
-			}
-			// fmt.Printf("DIRFD: %d\n", dirfd)
-			// fmt.Printf("PATH: %s\n", path)
-			// fmt.Printf("FLAGS: %08X\n", flags)
-
-			intent := Intent{
-				Program: os.Args[1],
-				Path:    path,
-				Read:    true,
-				Write:   false,
-			}
-			conf, _ := FindConfigMatch(configs, intent)
-			// fmt.Printf("conf: %+#v\n", conf)
-			perm := conf.PermForIntent(intent)
-
-			if perm == PermDeny {
-				fmt.Fprintln(os.Stderr, "[mayi]: Permission denied for", path)
-				resp.Flags = 0
-				resp.Error = -int32(unix.EACCES)
-			} else if perm == PermAsk {
-				fmt.Fprint(os.Stderr, "[mayi]: May I read your "+path+"?\n[Y/n]: ")
-				if !stdin.Scan() {
-					resp.Flags = 0
-					resp.Error = -int32(unix.EACCES)
-				}
-				if strings.ContainsAny(stdin.Text(), "Nn") {
-					resp.Flags = 0
-					resp.Error = -int32(unix.EACCES)
-				}
-			} else {
-				log.Printf("[mayi]: Permission auto allowed for %s\nPattern: %s", path, conf.Pattern.String())
-			}
-
 		}
 
 		_, _, errno = unix.Syscall(
@@ -197,27 +150,14 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			unix.SECCOMP_IOCTL_NOTIF_SEND,
 			uintptr(unsafe.Pointer(&resp)),
 		)
+		if errno == unix.ENOENT {
+			break
+		}
 		if errno != 0 {
+			log.Printf("%d: %s\n", errno, errno)
 			return errno
 		}
 	}
-
-	// cwd, err := ProcessCWD(pid, unix.AT_FDCWD)
-	// if err != nil {
-	// 	return err
-	// }
-	// _ = cwd
-
-	// fmt.Println("cwd", cwd)
-
-	// conf, found := FindConfigMatch(configs, Intent{
-	// 	Program: "emacs",
-	// 	Path:    "/home/igor/.ssh",
-	// 	Read:    true,
-	// 	Write:   false,
-	// })
-
-	// fmt.Printf("%v - %+#v\n", found, conf)
 
 	var status unix.WaitStatus
 	_, err = unix.Wait4(pid, &status, 0, nil)
@@ -226,10 +166,81 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 
 	if status.Exited() {
-		fmt.Println("exited with status", status.ExitStatus())
+		os.Exit(status.ExitStatus())
+	}
+
+	if status.Signaled() {
+		os.Exit(1)
 	}
 
 	return nil
+}
+
+func handleSyscallOpen(pid int, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
+	resp = SeccompNotifResp{
+		ID:    req.ID,
+		Flags: 0,
+		Error: -int32(unix.EACCES),
+	}
+	stdin := bufio.NewScanner(os.Stdin)
+
+	dirfd := int(int32(req.Data.Args[0]))
+	addr := uintptr(req.Data.Args[1])
+	flags := int(req.Data.Args[2])
+
+	path, err := readProcessString(pid, addr)
+	if err != nil {
+		return
+	}
+
+	path, err = resolveProcessPath(pid, dirfd, path)
+	if err != nil {
+		return
+	}
+
+	read := false
+	write := false
+
+	switch flags & unix.O_ACCMODE {
+	case unix.O_RDONLY:
+		read = true
+	case unix.O_WRONLY:
+		write = true
+	case unix.O_RDWR:
+		read = true
+		write = true
+	}
+
+	intent := Intent{
+		Program: os.Args[1],
+		Path:    path,
+		Read:    read,
+		Write:   write,
+	}
+	conf, _ := FindConfigMatch(configs, intent)
+	// fmt.Printf("conf: %+#v\n", conf)
+	perm := conf.PermForIntent(intent)
+
+	if perm == PermDeny {
+		fmt.Fprintln(os.Stderr, "Permission denied for", path)
+		resp.Flags = 0
+		resp.Error = -int32(unix.EACCES)
+		return
+	}
+	if perm == PermAsk {
+		fmt.Fprint(os.Stderr, "May I read your "+path+"?\n[Y/n]: ")
+		if !stdin.Scan() {
+			return
+		}
+		if strings.ContainsAny(stdin.Text(), "Nn") {
+			return
+		}
+	}
+
+	log.Printf("Permission auto allowed for %s\nPattern: %s", path, conf.Pattern.String())
+	resp.Error = 0
+	resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	return
 }
 
 func resolveProcessPath(pid int, dirfd int, path string) (string, error) {

@@ -4,10 +4,30 @@
 
 ## Example
 
+Intercepting open system calls:
+
 ```shell
 $ mayi cat ../../.ssh/id_rsa                 
-May I read '/home/igor/.ssh/id_rsa'? [Y/n]: n
+May I read '/home/igor/.ssh/id_rsa'?
+[Y/n]: n
 cat: ../../.ssh/id_rsa: Permission denied
+```
+
+Intercepting rename system calls:
+
+```shell
+$ mayi mv old new
+May I move or rename '/home/igor/Git/mayi/old' to '/home/igor/Git/mayi/new'?
+[Y/n]: 
+```
+
+Intercepting deletion system calls:
+
+```shell
+$ mayi rm yourfile
+May I delete your '/home/igor/Git/mayi/yourfile'?
+[Y/n]: n
+rm: cannot remove 'yourfile': Permission denied
 ```
 
 ## Status

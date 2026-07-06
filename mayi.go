@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -109,15 +110,26 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 
 	var configs []Config
 
-	file, err := os.Open("/home/igor/.config/mayi.ini")
-	if err == nil {
-		defer file.Close()
-		configs, err = ParseConfig(file)
-		// fmt.Printf("%+#v\n", configs)
-		if err != nil {
-			return err
+	configPath := os.Getenv("MAYI_CONFIG")
+	if configPath == "" {
+		if os.Getenv("HOME") != "" {
+			configPath = path.Join(os.Getenv("HOME"), "/.config/mayi.ini")
 		}
 	}
+
+	if configPath != "" {
+		file, err := os.Open(configPath)
+		if err == nil {
+			defer file.Close()
+			configs, err = ParseConfig(file)
+			// fmt.Printf("%+#v\n", configs)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	stdin := bufio.NewScanner(os.Stdin)
 
 	for {
 		req := SeccompNotif{}
@@ -135,12 +147,21 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			return errno
 		}
 
-		var resp SeccompNotifResp
+		resp := SeccompNotifResp{
+			ID:    req.ID,
+			Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE,
+		}
 
-		if req.Data.Nr == unix.SYS_OPENAT {
-			resp, err = handleSyscallOpen(pid, req, configs)
+		switch req.Data.Nr {
+		case unix.SYS_OPEN, unix.SYS_CREAT, unix.SYS_OPENAT, unix.SYS_OPENAT2:
+			resp, err = handleSyscallOpen(stdin, pid, req, configs)
 			if err != nil {
-				fmt.Print(err)
+				fmt.Fprint(os.Stderr, err)
+			}
+		case unix.SYS_UNLINK, unix.SYS_UNLINKAT:
+			resp, err = handleSyscallUnlink(stdin, pid, req, configs)
+			if err != nil {
+				fmt.Fprint(os.Stderr, err)
 			}
 		}
 
@@ -176,19 +197,36 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	return nil
 }
 
-func handleSyscallOpen(pid int, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
+func handleSyscallOpen(stdin *bufio.Scanner, pid int, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
 	resp = SeccompNotifResp{
 		ID:    req.ID,
 		Flags: 0,
 		Error: -int32(unix.EACCES),
 	}
-	stdin := bufio.NewScanner(os.Stdin)
 
-	dirfd := int(int32(req.Data.Args[0]))
-	addr := uintptr(req.Data.Args[1])
-	flags := int(req.Data.Args[2])
+	dirfd := unix.AT_FDCWD
+	rawPath := uintptr(0)
+	flags := unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC
 
-	path, err := readProcessString(pid, addr)
+	switch req.Data.Nr {
+	case unix.SYS_OPEN:
+		rawPath = uintptr(req.Data.Args[0])
+		flags = int(int32(req.Data.Args[1]))
+	case unix.SYS_CREAT:
+		rawPath = uintptr(req.Data.Args[0])
+	case unix.SYS_OPENAT:
+		dirfd = int(int32(req.Data.Args[0]))
+		rawPath = uintptr(req.Data.Args[1])
+		flags = int(int32(req.Data.Args[2]))
+	case unix.SYS_OPENAT2:
+		dirfd = int(int32(req.Data.Args[0]))
+		rawPath = uintptr(req.Data.Args[1])
+		// TODO: handle arg[2] open_how
+	default:
+		panic("wtf?")
+	}
+
+	path, err := readProcessString(pid, rawPath)
 	if err != nil {
 		return
 	}
@@ -238,6 +276,65 @@ func handleSyscallOpen(pid int, req SeccompNotif, configs []Config) (resp Seccom
 	}
 
 	log.Printf("Permission auto allowed for %s\nPattern: %s", path, conf.Pattern.String())
+	resp.Error = 0
+	resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	return
+
+}
+
+func handleSyscallUnlink(stdin *bufio.Scanner, pid int, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
+	resp = SeccompNotifResp{
+		ID:    req.ID,
+		Flags: 0,
+		Error: -int32(unix.EACCES),
+	}
+
+	dirfd := unix.AT_FDCWD
+	rawPath := uintptr(0)
+
+	switch req.Data.Nr {
+	case unix.SYS_UNLINK:
+		rawPath = uintptr(req.Data.Args[0])
+	case unix.SYS_UNLINKAT:
+		dirfd = int(int32(req.Data.Args[0]))
+		rawPath = uintptr(req.Data.Args[1])
+	}
+
+	path, err := readProcessString(pid, rawPath)
+	if err != nil {
+		return
+	}
+
+	path, err = resolveProcessPath(pid, dirfd, path)
+	if err != nil {
+		return
+	}
+
+	intent := Intent{
+		Program: os.Args[1],
+		Path:    path,
+		Read:    false,
+		Write:   true,
+	}
+	conf, _ := FindConfigMatch(configs, intent)
+	perm := conf.PermForIntent(intent)
+
+	if perm == PermDeny {
+		fmt.Fprintln(os.Stderr, "Permission denied for", path)
+		resp.Flags = 0
+		resp.Error = -int32(unix.EACCES)
+		return
+	}
+	if perm == PermAsk {
+		fmt.Fprint(os.Stderr, "May I delete your "+path+"?\n[Y/n]: ")
+		if !stdin.Scan() {
+			return
+		}
+		if strings.ContainsAny(stdin.Text(), "Nn") {
+			return
+		}
+	}
+
 	resp.Error = 0
 	resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
 	return
@@ -365,14 +462,6 @@ func runChild(ctx context.Context) error {
 
 	err = unix.Exec(arg, os.Args[2:], os.Environ())
 	return err
-}
-
-func ProcessCWD(pid, dirfd int) (string, error) {
-	if dirfd == unix.AT_FDCWD {
-		return os.Readlink(fmt.Sprintf("/proc/%d/cwd", pid))
-	} else {
-		return os.Readlink(fmt.Sprintf("/proc/%d/fd/%d", pid, dirfd))
-	}
 }
 
 type Perm int

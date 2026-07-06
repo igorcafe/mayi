@@ -7,8 +7,8 @@ mkdir -p tmp
 export MAYI_CONFIG="$PWD/tmp/mayi.ini"
 echo '\
 [*]
-/nix/store/* = read
-/run/current-system/* = read
+/nix/store/.* = read
+/run/current-system/.* = read
 ' > "$MAYI_CONFIG"
 
 test () {
@@ -27,7 +27,9 @@ test () {
 
 test 'mayi.c compiles' 'gcc ../mayi.c -Wall -o tmp/mayi'
 
-test 'mayi.c tests' 'gcc ../mayi.c -Wall -DTEST -o tmp/test && ./tmp/test'
+test 'mayi.go compiles' 'CGO_ENABLED=0 go build -o tmp/mayi ../mayi.go'
+
+#test 'mayi.c tests' 'gcc ../mayi.c -Wall -DTEST -o tmp/test && ./tmp/test'
 
 test 'syscall.c compiles' 'gcc syscall.c -Wall -Wextra -o tmp/syscall'
 

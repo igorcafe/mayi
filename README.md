@@ -12,73 +12,41 @@ cat: ../../.ssh/id_rsa: Permission denied
 
 ## Status
 
-This project is currently a proof of concept and **I'm NOT a security researcher**.
+This project is currently a proof of concept and I'm NOT a security researcher.
 
 ### Handled system calls
 
-- `open`, `creat`, `openat`, `openat2`
+- [X] `open`, `creat`, `openat`, `openat2`: can open files in read and/or write mode. Can even truncate them. TODO: make sure truncate scenarios are really covered.
 
-Can open files in read and/or write mode. Can even truncate them.
+- [X] `unlink`, `unlinkat`: deletes files.
 
-- `unlink`, `unlinkat`
+- [X] `rename`, `renameat`, `renameat2`: renames and/or moves files, but can also replace them.
 
-Deletes files.
+- [ ] `truncate`, `ftruncate`: can erase the file content.
 
-- `rename`, `renameat`, `renameat2`
+- [ ] `chmod`, `fchmod`, `fchmodat`: changes file permissions.
 
-Renames and/or moves files, but can also replace them.
+- [ ] `chown`, `fchown`, `lchown`, `fchownat`: changes file owner.
 
-### TO-DO
-
-- `truncate`, `ftruncate`
-
-Can erase the file content.
-
-- `chmod`, `fchmod`, `fchmodat`
-
-Changes file permissions.
-
-- `chown`, `fchown`, `lchown`, `fchownat`
-
-Changes file owner.
-
-- `link`, `linkat`, `symlink`, `symlinkat`
-
-Dangerous, because a hard link or a symlink can change the contents of a real file somewhere else.
+- [ ] `link`, `linkat`, `symlink`, `symlinkat`: dangerous, because a hard link or a symlink can change the contents of a real file somewhere else.
 The proper solution may be to always follow the links on open/truncate and similar operations.
 
-- `mkdir`, `mkdirat`
-
-Creates directory.
-Maybe not so important to handle?
-
-- `mknod`, `mknodat`
-
-Can create regular files, devices, named pipes...
-Maybe not so important to handle?
-
+- [ ] TODO: handle networking, sockets, addresses, and so on. Requires adapting the config file.
 
 ### Not planned
 
 System calls that aren't harmful enough to care, or are already covered by broader filesystem permissions.
 
-- `rmdir`
+- `rmdir`: removes an empty directory.
 
-Removes an empty directory.
+- `mkdir`, `mkdirat`: creates directory. Maybe not so important to handle?
 
-- `access`, `faccessat`, `faccessat2`
+- `mknod`, `mknodat`: can create regular files, devices, named pipes... Maybe not so important to handle?
 
-Checks user permission to access file.
+- `access`, `faccessat`, `faccessat2`: checks user permission to access file.
 
-- `stat`, `fstat`, `lstat`, `newfstatat`
+- `stat`, `fstat`, `lstat`, `newfstatat`: read metadata about the file.
 
-Read metadata about the file.
+- `getdents`, `getdents64`: Read the contents of a directory. Needs to open the directory file first, which is already covered by `open`.
 
-- `getdents`, `getdents64`
-
-Read the contents of a directory.
-Needs to open the directory file first, which is already covered by `open`.
-
-- `readlink`, `readlinkat`
-
-Reads the path a symbolic link points to.
+- `readlink`, `readlinkat`: Reads the path a symbolic link points to.

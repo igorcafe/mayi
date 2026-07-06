@@ -18,10 +18,10 @@ This project is currently a proof of concept and **I'm NOT a security researcher
 
 - `open`, `creat`, `openat`, `openat2`
 - `unlink`, `unlinkat`
+- `rename`, `renameat`, `renameat2`
 
 ### TO-DO
 
-- `rename`, `renameat`, `renameat2`
 - `truncate`, `ftruncate`
 - `chmod`, `fchmod`, `fchmodat`
 - `chown`, `fchown`, `lchown`, `fchownat`

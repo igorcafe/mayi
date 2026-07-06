@@ -53,10 +53,10 @@ func main() {
 		panic(err)
 	}
 
+	log.SetFlags(log.Lshortfile)
 	log.SetOutput(io.Discard)
 
 	if os.Args[1] == "-v" {
-		log.SetFlags(log.Lshortfile)
 		log.SetOutput(os.Stderr)
 		os.Args = append(os.Args[:1], os.Args[2:]...)
 	}
@@ -160,6 +160,11 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			}
 		case unix.SYS_UNLINK, unix.SYS_UNLINKAT:
 			resp, err = handleSyscallUnlink(stdin, pid, req, configs)
+			if err != nil {
+				fmt.Fprint(os.Stderr, err)
+			}
+		case unix.SYS_RENAME, unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
+			resp, err = handleSyscallRename(stdin, pid, req, configs)
 			if err != nil {
 				fmt.Fprint(os.Stderr, err)
 			}
@@ -340,7 +345,95 @@ func handleSyscallUnlink(stdin *bufio.Scanner, pid int, req SeccompNotif, config
 	return
 }
 
+func handleSyscallRename(stdin *bufio.Scanner, pid int, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
+	resp = SeccompNotifResp{
+		ID:    req.ID,
+		Flags: 0,
+		Error: -int32(unix.EACCES),
+	}
+
+	oldDirfd := unix.AT_FDCWD
+	newDirfd := unix.AT_FDCWD
+	rawOldPath := uintptr(0)
+	rawNewPath := uintptr(0)
+
+	switch req.Data.Nr {
+	case unix.SYS_RENAME:
+		rawOldPath = uintptr(req.Data.Args[0])
+		rawOldPath = uintptr(req.Data.Args[1])
+	case unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
+		oldDirfd = int(int32(req.Data.Args[0]))
+		rawOldPath = uintptr(req.Data.Args[1])
+		newDirfd = int(int32(req.Data.Args[2]))
+		rawNewPath = uintptr(req.Data.Args[3])
+		// TODO: args[4] in renameat2 is a set of flags, should i care?
+	}
+
+	oldPath, err := readProcessString(pid, rawOldPath)
+	if err != nil {
+		return
+	}
+
+	oldPath, err = resolveProcessPath(pid, oldDirfd, oldPath)
+	if err != nil {
+		return
+	}
+
+	newPath, err := readProcessString(pid, rawNewPath)
+	if err != nil {
+		return
+	}
+
+	newPath, err = resolveProcessPath(pid, newDirfd, newPath)
+	if err != nil {
+		return
+	}
+
+	intentOld := Intent{
+		Program: os.Args[1],
+		Path:    oldPath,
+		Read:    false,
+		Write:   true,
+	}
+	confOld, _ := FindConfigMatch(configs, intentOld)
+	permOld := confOld.PermForIntent(intentOld)
+
+	intentNew := Intent{
+		Program: os.Args[1],
+		Path:    newPath,
+		Read:    false,
+		Write:   true,
+	}
+	confNew, _ := FindConfigMatch(configs, intentNew)
+	permNew := confNew.PermForIntent(intentNew)
+
+	if permOld == PermDeny || permNew == PermDeny {
+		fmt.Fprintln(os.Stderr, "Permission denied for", oldPath)
+		resp.Flags = 0
+		resp.Error = -int32(unix.EACCES)
+		return
+	}
+
+	if permOld == PermAsk || permNew == PermAsk {
+		fmt.Fprintf(os.Stderr, "May I rename '%s' to '%s'?\n[Y/n]: ", oldPath, newPath)
+		if !stdin.Scan() {
+			return
+		}
+		if strings.ContainsAny(stdin.Text(), "Nn") {
+			return
+		}
+	}
+
+	resp.Error = 0
+	resp.Flags = unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE
+	return
+}
+
 func resolveProcessPath(pid int, dirfd int, path string) (string, error) {
+	if len(path) == 0 {
+		return path, errors.New("invalid path")
+	}
+
 	path = regexp.MustCompile(`/{2,}`).ReplaceAllString(path, "/")
 	if path[0] == '/' {
 		return path, nil
@@ -382,6 +475,7 @@ func readProcessString(pid int, addr uintptr) (string, error) {
 	if n < 0 {
 		return "", errors.New("couldn't read process memory")
 	}
+	buf = buf[:n]
 
 	n = slices.Index(buf, 0)
 	if n < 0 {
@@ -430,6 +524,15 @@ func runChild(ctx context.Context) error {
 		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
 
 		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_UNLINKAT, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_RENAME, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_RENAMEAT, 0, 1),
+		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
+
+		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_RENAMEAT2, 0, 1),
 		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
 
 		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW),

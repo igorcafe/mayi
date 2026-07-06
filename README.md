@@ -2,6 +2,8 @@
 
 `mayi` intercepts potentially dangerous Linux system calls and prompts the user for confirmation before executing them.
 
+It detects a program trying to read, write, delete or rename a file and prompts the user to confirm the action.
+
 ## Example
 
 Intercepting open system calls:
@@ -31,6 +33,7 @@ rm: cannot remove 'yourfile': Permission denied
 ```
 
 Config example:
+
 ```ini
 [*] # global config
 /etc/.* = read write

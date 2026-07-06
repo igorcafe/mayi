@@ -81,7 +81,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		return err
 	}
 
-	pid, err := syscall.ForkExec(
+	initialPid, err := syscall.ForkExec(
 		"/proc/self/exe",
 		append([]string{"/proc/self/exe", "--child"}, os.Args[1:]...),
 		&syscall.ProcAttr{
@@ -154,19 +154,19 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 
 		switch req.Data.Nr {
 		case unix.SYS_OPEN, unix.SYS_CREAT, unix.SYS_OPENAT, unix.SYS_OPENAT2:
-			resp, err = handleSyscallOpen(stdin, pid, req, configs)
+			resp, err = handleSyscallOpen(stdin, req, configs)
 			if err != nil {
-				fmt.Fprint(os.Stderr, err)
+				fmt.Fprintf(os.Stderr, "open(%d): %v\n", req.Data.Nr, err)
 			}
 		case unix.SYS_UNLINK, unix.SYS_UNLINKAT:
-			resp, err = handleSyscallUnlink(stdin, pid, req, configs)
+			resp, err = handleSyscallUnlink(stdin, req, configs)
 			if err != nil {
-				fmt.Fprint(os.Stderr, err)
+				fmt.Fprintf(os.Stderr, "unlink(%d): %v\n", req.Data.Nr, err)
 			}
 		case unix.SYS_RENAME, unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
-			resp, err = handleSyscallRename(stdin, pid, req, configs)
+			resp, err = handleSyscallRename(stdin, req, configs)
 			if err != nil {
-				fmt.Fprint(os.Stderr, err)
+				fmt.Fprintf(os.Stderr, "rename(%d): %v\n", req.Data.Nr, err)
 			}
 		}
 
@@ -186,7 +186,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 
 	var status unix.WaitStatus
-	_, err = unix.Wait4(pid, &status, 0, nil)
+	_, err = unix.Wait4(initialPid, &status, 0, nil)
 	if err != nil {
 		return err
 	}
@@ -202,7 +202,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	return nil
 }
 
-func handleSyscallOpen(stdin *bufio.Scanner, pid int, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
+func handleSyscallOpen(stdin *bufio.Scanner, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
 	resp = SeccompNotifResp{
 		ID:    req.ID,
 		Flags: 0,
@@ -231,12 +231,12 @@ func handleSyscallOpen(stdin *bufio.Scanner, pid int, req SeccompNotif, configs 
 		panic("wtf?")
 	}
 
-	path, err := readProcessString(pid, rawPath)
+	path, err := readProcessString(int(req.Pid), rawPath)
 	if err != nil {
 		return
 	}
 
-	path, err = resolveProcessPath(pid, dirfd, path)
+	path, err = resolveProcessPath(int(req.Pid), dirfd, path)
 	if err != nil {
 		return
 	}
@@ -287,7 +287,7 @@ func handleSyscallOpen(stdin *bufio.Scanner, pid int, req SeccompNotif, configs 
 
 }
 
-func handleSyscallUnlink(stdin *bufio.Scanner, pid int, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
+func handleSyscallUnlink(stdin *bufio.Scanner, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
 	resp = SeccompNotifResp{
 		ID:    req.ID,
 		Flags: 0,
@@ -305,12 +305,12 @@ func handleSyscallUnlink(stdin *bufio.Scanner, pid int, req SeccompNotif, config
 		rawPath = uintptr(req.Data.Args[1])
 	}
 
-	path, err := readProcessString(pid, rawPath)
+	path, err := readProcessString(int(req.Pid), rawPath)
 	if err != nil {
 		return
 	}
 
-	path, err = resolveProcessPath(pid, dirfd, path)
+	path, err = resolveProcessPath(int(req.Pid), dirfd, path)
 	if err != nil {
 		return
 	}
@@ -345,7 +345,7 @@ func handleSyscallUnlink(stdin *bufio.Scanner, pid int, req SeccompNotif, config
 	return
 }
 
-func handleSyscallRename(stdin *bufio.Scanner, pid int, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
+func handleSyscallRename(stdin *bufio.Scanner, req SeccompNotif, configs []Config) (resp SeccompNotifResp, err error) {
 	resp = SeccompNotifResp{
 		ID:    req.ID,
 		Flags: 0,
@@ -369,22 +369,22 @@ func handleSyscallRename(stdin *bufio.Scanner, pid int, req SeccompNotif, config
 		// TODO: args[4] in renameat2 is a set of flags, should i care?
 	}
 
-	oldPath, err := readProcessString(pid, rawOldPath)
+	oldPath, err := readProcessString(int(req.Pid), rawOldPath)
 	if err != nil {
 		return
 	}
 
-	oldPath, err = resolveProcessPath(pid, oldDirfd, oldPath)
+	oldPath, err = resolveProcessPath(int(req.Pid), oldDirfd, oldPath)
 	if err != nil {
 		return
 	}
 
-	newPath, err := readProcessString(pid, rawNewPath)
+	newPath, err := readProcessString(int(req.Pid), rawNewPath)
 	if err != nil {
 		return
 	}
 
-	newPath, err = resolveProcessPath(pid, newDirfd, newPath)
+	newPath, err = resolveProcessPath(int(req.Pid), newDirfd, newPath)
 	if err != nil {
 		return
 	}
@@ -432,6 +432,10 @@ func handleSyscallRename(stdin *bufio.Scanner, pid int, req SeccompNotif, config
 func resolveProcessPath(pid int, dirfd int, path string) (string, error) {
 	if len(path) == 0 {
 		return path, errors.New("invalid path")
+	}
+
+	if len(path) > 1 {
+		path = strings.TrimSuffix(path, "/")
 	}
 
 	path = regexp.MustCompile(`/{2,}`).ReplaceAllString(path, "/")

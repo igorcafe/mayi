@@ -1,4 +1,4 @@
-<img width="704" height="453" alt="image" src="https://github.com/user-attachments/assets/1471bc45-5c8b-4940-92d7-2af58399a8b0" /># May I read your `~/.ssh/id_rsa`?
+# May I read your `~/.ssh/id_rsa`?
 
 `mayi` intercepts potentially dangerous Linux system calls and prompts the user for confirmation before executing them.
 

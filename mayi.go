@@ -743,11 +743,15 @@ func parseConfig(r io.Reader) ([]Config, error) {
 			switch field {
 			case "write:deny":
 				conf.Write = PermDeny
-			case "write":
+			case "write:ask":
+				conf.Write = PermAsk
+			case "write", "write:allow":
 				conf.Write = PermAllow
 			case "read:deny":
 				conf.Read = PermDeny
-			case "read":
+			case "read:ask":
+				conf.Read = PermAsk
+			case "read", "read:allow":
 				conf.Read = PermAllow
 			case "allow":
 				conf.Read = PermAllow
@@ -755,6 +759,9 @@ func parseConfig(r io.Reader) ([]Config, error) {
 			case "deny":
 				conf.Read = PermDeny
 				conf.Write = PermDeny
+			case "ask":
+				conf.Read = PermAsk
+				conf.Write = PermAsk
 			}
 		}
 

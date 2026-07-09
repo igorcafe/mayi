@@ -624,6 +624,19 @@ const (
 	PermAllow
 )
 
+func (p Perm) String() string {
+	switch p {
+	case PermDeny:
+		return "DENY"
+	case PermAsk:
+		return "ASK"
+	case PermAllow:
+		return "ALLOW"
+	default:
+		panic("wtf")
+	}
+}
+
 type Intent struct {
 	Program string
 	Prompt  string
@@ -641,6 +654,10 @@ type Config struct {
 	Pattern *regexp.Regexp
 	Read    Perm
 	Write   Perm
+}
+
+func (c Config) String() string {
+	return fmt.Sprintf(`{Program: "%s", Pattern: "%s", Read: %s, Write: %s}`, c.Program, c.Pattern.String(), c.Read.String(), c.Write.String())
 }
 
 func permForIntent(configs []Config, intent Intent) Perm {

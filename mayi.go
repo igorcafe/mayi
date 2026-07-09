@@ -273,25 +273,29 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		case PermAsk:
 			accepted := promptUser(intent)
 			if accepted {
-				resp = respAllow
-				for _, action := range intent.Actions {
-					read := PermAsk
-					if action.Read {
-						read = PermAllow
-					}
+				perm = PermAllow
+			} else {
+				perm = PermDeny
+			}
 
-					write := PermAsk
-					if action.Write {
-						write = PermAllow
-					}
-
-					configs = append(configs, Config{
-						Program: intent.Program,
-						Pattern: regexp.MustCompile("^" + regexp.QuoteMeta(action.Path) + "$"),
-						Read:    read,
-						Write:   write,
-					})
+			resp = respAllow
+			for _, action := range intent.Actions {
+				read := PermAsk
+				if action.Read {
+					read = perm
 				}
+
+				write := PermAsk
+				if action.Write {
+					write = perm
+				}
+
+				configs = append(configs, Config{
+					Program: intent.Program,
+					Pattern: regexp.MustCompile("^" + regexp.QuoteMeta(action.Path) + "$"),
+					Read:    read,
+					Write:   write,
+				})
 			}
 		default:
 			resp = respAllow

@@ -114,6 +114,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	if err != nil {
 		return err
 	}
+	log.Printf("initial PID: %d", initialPid)
 
 	err = unix.Close(childSock)
 	if err != nil {

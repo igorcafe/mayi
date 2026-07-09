@@ -196,9 +196,6 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 				intent.Program+": "+intent.Prompt,
 			)
 
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-
 			err := cmd.Run()
 			if err == nil {
 				return true

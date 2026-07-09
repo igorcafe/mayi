@@ -93,6 +93,11 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		return err
 	}
 
+	err = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
+	if err != nil {
+		return err
+	}
+
 	initialPid, err := syscall.ForkExec(
 		"/proc/self/exe",
 		append([]string{"/proc/self/exe", "--child"}, os.Args[1:]...),

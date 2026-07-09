@@ -252,7 +252,11 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 
 		switch perm {
 		case PermDeny:
-			fmt.Fprintln(os.Stderr, "Permission denied for", intent.Actions[0].Path, intent.Actions[1].Path)
+			fmt.Fprint(os.Stderr, "Permission denied for: ")
+			for _, action := range intent.Actions {
+				fmt.Fprint(os.Stderr, action.Path)
+			}
+			fmt.Fprintln(os.Stderr)
 			resp = respDeny
 		case PermAsk:
 			accepted := promptUser(intent)

@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -541,6 +542,7 @@ func readProcessString(pid int, addr uintptr) (string, error) {
 }
 
 func runChild(ctx context.Context) error {
+	runtime.LockOSThread()
 	var err error
 	childSock := 3
 

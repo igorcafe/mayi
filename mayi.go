@@ -195,7 +195,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 
 		resp := respDeny
 
-		intent, err := parseSyscallIntent(req, configs)
+		intent, err := parseSyscallIntent(req)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "rename(%d): %v\n", req.Data.Nr, err)
 			return err
@@ -266,7 +266,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	return nil
 }
 
-func parseSyscallIntent(req SeccompNotif, configs []Config) (Intent, error) {
+func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 	var intent Intent
 
 	switch req.Data.Nr {

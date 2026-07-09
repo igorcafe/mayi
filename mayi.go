@@ -664,6 +664,7 @@ type Action struct {
 
 type Config struct {
 	Program string
+	Key     string
 	Pattern *regexp.Regexp
 	Read    Perm
 	Write   Perm
@@ -682,8 +683,20 @@ func permForIntent(configs []Config, intent Intent) Perm {
 			if intent.Program != conf.Program && conf.Program != "*" {
 				continue
 			}
-			if !conf.Pattern.MatchString(action.Path) {
-				continue
+			switch conf.Key {
+			case "dirs":
+				stat, err := os.Stat(action.Path)
+				if err != nil {
+					// fmt.Fprintf(os.Stderr, "failed to stat %s: %v\n", action.Path, err)
+					continue
+				}
+				if !stat.IsDir() {
+					continue
+				}
+			default:
+				if !conf.Pattern.MatchString(action.Path) {
+					continue
+				}
 			}
 
 			found = true
@@ -732,12 +745,6 @@ func parseConfig(r io.Reader) ([]Config, error) {
 			continue
 		}
 
-		conf := Config{
-			Program: program,
-			Read:    PermAsk,
-			Write:   PermAsk,
-		}
-
 		key := strings.TrimSpace(chunks[0])
 		key = regexp.MustCompile(`\$\w+`).ReplaceAllStringFunc(key, func(prev string) string {
 			key := prev[1:]
@@ -745,10 +752,19 @@ func parseConfig(r io.Reader) ([]Config, error) {
 			return env
 		})
 
-		var err error
-		conf.Pattern, err = regexp.Compile("^" + key + "$")
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "[mayi] ignoring invalid regexp:", line)
+		conf := Config{
+			Program: program,
+			Key:     key,
+			Read:    PermAsk,
+			Write:   PermAsk,
+		}
+
+		if strings.HasPrefix(key, "/") {
+			var err error
+			conf.Pattern, err = regexp.Compile("^" + key + "$")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "[mayi] ignoring invalid regexp:", line)
+			}
 		}
 
 		val := strings.TrimSpace(chunks[1])

@@ -197,7 +197,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 
 		intent, err := parseSyscallIntent(req)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "rename(%d): %v\n", req.Data.Nr, err)
+			fmt.Fprintln(os.Stderr, err)
 			return err
 		}
 
@@ -295,12 +295,12 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 
 		path, err := readProcessString(int(req.Pid), rawPath)
 		if err != nil {
-			return intent, err
+			return intent, fmt.Errorf("open(%d): %w", req.Data.Nr, err)
 		}
 
 		path, err = resolveProcessPath(int(req.Pid), dirfd, path)
 		if err != nil {
-			return intent, err
+			return intent, fmt.Errorf("open(%d): %w", req.Data.Nr, err)
 		}
 
 		read := false
@@ -351,12 +351,12 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 
 		path, err := readProcessString(int(req.Pid), rawPath)
 		if err != nil {
-			return intent, err
+			return intent, fmt.Errorf("unlink(%d): %w", req.Data.Nr, err)
 		}
 
 		path, err = resolveProcessPath(int(req.Pid), dirfd, path)
 		if err != nil {
-			return intent, err
+			return intent, fmt.Errorf("unlink(%d): %w", req.Data.Nr, err)
 		}
 
 		return Intent{
@@ -391,22 +391,22 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 
 		oldPath, err := readProcessString(int(req.Pid), rawOldPath)
 		if err != nil {
-			return intent, err
+			return intent, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
 		}
 
 		oldPath, err = resolveProcessPath(int(req.Pid), oldDirfd, oldPath)
 		if err != nil {
-			return intent, err
+			return intent, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
 		}
 
 		newPath, err := readProcessString(int(req.Pid), rawNewPath)
 		if err != nil {
-			return intent, err
+			return intent, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
 		}
 
 		newPath, err = resolveProcessPath(int(req.Pid), newDirfd, newPath)
 		if err != nil {
-			return intent, err
+			return intent, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
 		}
 
 		return Intent{

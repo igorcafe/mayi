@@ -32,14 +32,6 @@ func main() {
 		panic(err)
 	}
 
-	log.SetFlags(log.Lshortfile)
-	log.SetOutput(io.Discard)
-
-	if os.Args[1] == "-v" {
-		log.SetOutput(os.Stderr)
-		os.Args = append(os.Args[:1], os.Args[2:]...)
-	}
-
 	sockets, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_DGRAM, 0)
 	if err != nil {
 		panic(err)
@@ -76,6 +68,26 @@ type SeccompNotifResp struct {
 }
 
 func runParent(ctx context.Context, childSock, parentSock int) error {
+	usePopup := false
+	log.SetFlags(log.Lshortfile)
+	log.SetOutput(io.Discard)
+
+	for {
+		if os.Args[1] == "-v" {
+			log.SetOutput(os.Stderr)
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+			continue
+		}
+
+		if os.Args[1] == "-popup" {
+			usePopup = true
+			os.Args = append(os.Args[:1], os.Args[2:]...)
+			continue
+		}
+
+		break
+	}
+
 	err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 	if err != nil {
 		return err
@@ -144,27 +156,33 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		return true
 	}
 
-	promptUser = func(intent Intent) bool {
-		if _, err := exec.LookPath("zenity"); err != nil {
-			fmt.Fprintln(os.Stderr, "zenity not installed, refusing permission: ", intent.Prompt)
+	if usePopup {
+		promptUser = func(intent Intent) bool {
+			if _, err := exec.LookPath("zenity"); err != nil {
+				fmt.Fprintln(os.Stderr, "zenity not installed, refusing permission: ", intent.Prompt)
+				return false
+			}
+
+			cmd := exec.CommandContext(
+				ctx,
+				"zenity",
+				"--question",
+				"--title",
+				"mayi",
+				"--text",
+				intent.Program+": "+intent.Prompt,
+			)
+
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			err := cmd.Run()
+			if err == nil {
+				return true
+			}
+
 			return false
 		}
-
-		cmd := exec.Command(
-			"zenity",
-			"--question",
-			"--title",
-			"mayi",
-			"--text",
-			intent.Prompt,
-		)
-
-		err := cmd.Run()
-		if err == nil {
-			return true
-		}
-
-		return false
 	}
 
 	for {

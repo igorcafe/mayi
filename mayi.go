@@ -169,12 +169,10 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 
 	if usePopup {
+		if _, err := exec.LookPath("zenity"); err != nil {
+			return errors.New("zenity is required to use popup")
+		}
 		promptUser = func(intent Intent) bool {
-			if _, err := exec.LookPath("zenity"); err != nil {
-				fmt.Fprintln(os.Stderr, "zenity not installed, refusing permission: ", intent.Prompt)
-				return false
-			}
-
 			cmd := exec.CommandContext(
 				ctx,
 				"zenity",

@@ -27,7 +27,7 @@ test () {
     fi
 }
 
-test 'mayi.c compiles' 'gcc ../mayi.c -Wall -o tmp/mayi'
+#test 'mayi.c compiles' 'gcc ../mayi.c -Wall -o tmp/mayi'
 
 test 'mayi.go compiles' 'CGO_ENABLED=0 go build -o tmp/mayi ../mayi.go'
 

@@ -516,19 +516,25 @@ func readProcessString(pid int, addr uintptr) (string, error) {
 		},
 	}
 
+	err2 := fmt.Errorf("process_vm_readv(pid=%d - addr=%X)", pid, addr)
+
 	n, err := unix.ProcessVMReadv(pid, local, remote, 0)
 	if err != nil {
-		return "", err
+		{
+			b, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+			log.Printf("process %d status: %s - %v", pid, string(b), err)
+		}
+		return "", fmt.Errorf("%w: %w", err2, err)
 	}
 
 	if n < 0 {
-		return "", errors.New("couldn't read process memory")
+		return "", fmt.Errorf("%w: couldn't read process memory", err2)
 	}
 	buf = buf[:n]
 
 	n = slices.Index(buf, 0)
 	if n < 0 {
-		return "", errors.New("didn't read a null terminated string")
+		return "", fmt.Errorf("%w: didn't read a null terminated string", err2)
 	}
 
 	return unsafe.String(&buf[0], n), nil

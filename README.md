@@ -4,58 +4,43 @@
 
 It detects a program trying to read, write, delete or rename a file and prompts the user to confirm the action.
 
-## Example
+## Showcase
 
-Intercepting open system calls:
-
-```shell
-$ mayi bash steal_ssh.sh
-May I read your '/home/igor/.ssh/id_rsa'?
-[Y/n]: n
-cat: /home/igor/.ssh/id_rsa: Permission denied
-```
-
-Intercepting rename system calls:
-
-```shell
-$ mayi mv old new
-May I move or rename '/home/igor/Git/mayi/old' to '/home/igor/Git/mayi/new'?
-[Y/n]: 
-```
-
-Intercepting deletion system calls:
-
-```shell
-$ mayi rm yourfile
-May I delete your '/home/igor/Git/mayi/yourfile'?
-[Y/n]: n
-rm: cannot remove 'yourfile': Permission denied
-```
 
 Config example:
 
 ```ini
 [*] # global config
-/etc/.* = read write
-/run/.* = read write
-/var/.* = read write
-/usr/.* = read write
-/lib.* = read write
-/bin/.* = read write
-/tmp/.* = read write
-/run/.* = read write
-/proc/.* = read write
-/sys/.* = read write
-/dev/.* = read write
+/etc/.* = allow
+/run/.* = allow
+/var/.* = allow
+/usr/.* = allow
+/lib.* = allow
+/bin/.* = allow
+/tmp/.* = allow
+/run/.* = allow
+/proc/.* = allow
+/sys/.* = allow
+/dev/.* = allow
+dirs = read
 
 [emacs] # per program config
-
-# env variables works too
-$PWD/.* = read write
-$HOME = read
-$HOME/.gitconfig = read
-$HOME/\.emacs.* = read write
+popup = true  # prompt permission using a graphical popup instead of terminal
+$HOME/\.gitconfig = read  # environment variables work too
+$HOME/\.emacs.* = allow
+$HOME/dotfiles.* = allow
+$HOME/Git/.* = allow
 ```
+
+Launch the program, for example, emacs:
+
+```shell
+$ mayi emacs
+```
+
+If I try to read or write to any path not configured, it will prompt me to allow or deny:
+
+If I deny Emacs will show an error message:
 
 ## Status
 

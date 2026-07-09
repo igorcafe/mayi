@@ -58,6 +58,12 @@ And any child process will be constrained by mayi:
 
 <img width="654" height="259" alt="image" src="https://github.com/user-attachments/assets/911c7712-0d55-4d40-84c6-ba2893bf65ef" />
 
+### Other prompts
+
+<img width="582" height="326" alt="image" src="https://github.com/user-attachments/assets/f62ad358-6508-49ca-812d-b4ee19d27fab" />
+
+<img width="628" height="350" alt="image" src="https://github.com/user-attachments/assets/a4a6c6fc-fd32-4acb-98a8-317f54b88fbd" />
+
 
 ## Status
 
@@ -71,6 +77,9 @@ For path operations that's not enough, because while a thread can ask to read a 
 If the child process is able to change the path buffer and mayi sends a `SECCOMP_USER_NOTIF_FLAG_CONTINUE`, it will allow the child process to read a different path from the one allowed.
 
 The way to (probably) fix this is by resolving the system calls in the supervisor with its own copied paths, and to send the file descriptor to the child process, when applicable. I plan to do that soon.
+
+Another issue is that some programs can launch other programs without being child processes, like KDE "Open with...".
+Since it's not a child process, it cannot be constrained by mayi.
 
 ### Handled system calls
 

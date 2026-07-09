@@ -310,14 +310,14 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 		switch flags & unix.O_ACCMODE {
 		case unix.O_RDONLY:
 			read = true
-			prompt = fmt.Sprintf("May I read your '%s'?", path)
+			prompt = fmt.Sprintf("May I read from '%s'?", path)
 		case unix.O_WRONLY:
 			write = true
-			prompt = fmt.Sprintf("May I write your '%s'?", path)
+			prompt = fmt.Sprintf("May I write to '%s'?", path)
 		case unix.O_RDWR:
 			read = true
 			write = true
-			prompt = fmt.Sprintf("May I read AND write your '%s'?", path)
+			prompt = fmt.Sprintf("May I read AND write to '%s'?", path)
 		default:
 			// TODO:
 			read = true
@@ -411,7 +411,7 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 
 		return Intent{
 			Program: os.Args[1],
-			Prompt:  fmt.Sprintf("May I move or rename '%s' to '%s'?", oldPath, newPath),
+			Prompt:  fmt.Sprintf("May I rename '%s' to '%s'?", oldPath, newPath),
 			Actions: []Action{
 				{
 					Path:  oldPath,

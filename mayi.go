@@ -199,7 +199,24 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			uintptr(unsafe.Pointer(&req)),
 		)
 		if errno == unix.ENOENT {
-			break
+			var status unix.WaitStatus
+			wpid, err := unix.Wait4(initialPid, &status, unix.WNOHANG, nil)
+			if err != nil {
+				return err
+			}
+
+			if wpid == 0 {
+				continue
+			}
+
+			if status.Exited() {
+				os.Exit(status.ExitStatus())
+			}
+
+			if status.Signaled() {
+				os.Exit(1)
+			}
+			continue
 		}
 		if errno != 0 {
 			fmt.Printf("%d: %s\n", errno, errno)
@@ -264,26 +281,29 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			uintptr(unsafe.Pointer(&resp)),
 		)
 		if errno == unix.ENOENT {
-			break
+			var status unix.WaitStatus
+			wpid, err := unix.Wait4(initialPid, &status, unix.WNOHANG, nil)
+			if err != nil {
+				return err
+			}
+
+			if wpid == 0 {
+				continue
+			}
+
+			if status.Exited() {
+				os.Exit(status.ExitStatus())
+			}
+
+			if status.Signaled() {
+				os.Exit(1)
+			}
+			continue
 		}
 		if errno != 0 {
 			log.Printf("%d: %s\n", errno, errno)
 			return errno
 		}
-	}
-
-	var status unix.WaitStatus
-	_, err = unix.Wait4(initialPid, &status, 0, nil)
-	if err != nil {
-		return err
-	}
-
-	if status.Exited() {
-		os.Exit(status.ExitStatus())
-	}
-
-	if status.Signaled() {
-		os.Exit(1)
 	}
 
 	return nil

@@ -89,6 +89,8 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		break
 	}
 
+	program := path.Base(os.Args[1])
+
 	err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 	if err != nil {
 		return err
@@ -165,6 +167,17 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 				continue
 			}
 			return true
+		}
+	}
+
+	for _, conf := range slices.Backward(configs) {
+		// TODO: os.Args[1] is fragile... passing a full path like /bin/bash won't match [bash] conf
+		if conf.Program != "*" && conf.Program != program {
+			continue
+		}
+		if conf.Key == "popup" && conf.Val == "true" {
+			usePopup = true
+			break
 		}
 	}
 
@@ -245,6 +258,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			fmt.Fprintln(os.Stderr, err)
 			return err
 		}
+		intent.Program = program
 
 		perm := permForIntent(configs, intent)
 
@@ -378,7 +392,7 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 		}
 
 		return Intent{
-			Program: os.Args[1],
+			Program: "?",
 			Prompt:  prompt,
 			Actions: []Action{
 				{
@@ -667,6 +681,7 @@ type Action struct {
 type Config struct {
 	Program string
 	Key     string
+	Val     string
 	Pattern *regexp.Regexp
 	Read    Perm
 	Write   Perm
@@ -696,7 +711,7 @@ func permForIntent(configs []Config, intent Intent) Perm {
 					continue
 				}
 			default:
-				if !conf.Pattern.MatchString(action.Path) {
+				if conf.Pattern == nil || !conf.Pattern.MatchString(action.Path) {
 					continue
 				}
 			}
@@ -770,6 +785,7 @@ func parseConfig(r io.Reader) ([]Config, error) {
 		}
 
 		val := strings.TrimSpace(chunks[1])
+		conf.Val = val
 		for field := range strings.FieldsSeq(val) {
 			switch field {
 			case "write:deny":

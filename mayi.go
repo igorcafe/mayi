@@ -54,18 +54,18 @@ func main() {
 	}
 }
 
-type SeccompData struct {
-	Nr   int32
-	Arch uint32
-	IP   uint64
-	Args [6]uint64
-}
-
 type SeccompNotif struct {
 	ID    uint64
 	Pid   uint32
 	Flags uint32
 	Data  SeccompData
+}
+
+type SeccompData struct {
+	Nr   int32
+	Arch uint32
+	IP   uint64
+	Args [6]uint64
 }
 
 type SeccompNotifResp struct {
@@ -132,6 +132,41 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 
 	stdin := bufio.NewScanner(os.Stdin)
 
+	promptUser := func(intent Intent) bool {
+		fmt.Fprintf(os.Stderr, "%s\n[Y/n]: ", intent.Prompt)
+		if !stdin.Scan() {
+			return false
+		}
+		if strings.ContainsAny(stdin.Text(), "Nn") {
+			return false
+		}
+
+		return true
+	}
+
+	promptUser = func(intent Intent) bool {
+		if _, err := exec.LookPath("zenity"); err != nil {
+			fmt.Fprintln(os.Stderr, "zenity not installed, refusing permission: ", intent.Prompt)
+			return false
+		}
+
+		cmd := exec.Command(
+			"zenity",
+			"--question",
+			"--title",
+			"mayi",
+			"--text",
+			intent.Prompt,
+		)
+
+		err := cmd.Run()
+		if err == nil {
+			return true
+		}
+
+		return false
+	}
+
 	for {
 		req := SeccompNotif{}
 		_, _, errno := unix.Syscall(
@@ -168,16 +203,13 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 
 		perm := permForIntent(configs, intent)
 
-		if perm == PermDeny {
+		switch perm {
+		case PermDeny:
 			fmt.Fprintln(os.Stderr, "Permission denied for", intent.Actions[0].Path, intent.Actions[1].Path)
 			resp = respDeny
-		} else if perm == PermAsk {
-			fmt.Fprintf(os.Stderr, "%s\n[Y/n]: ", intent.Prompt)
-			if !stdin.Scan() {
-				resp = respDeny
-			} else if strings.ContainsAny(stdin.Text(), "Nn") {
-				resp = respDeny
-			} else {
+		case PermAsk:
+			accepted := promptUser(intent)
+			if accepted {
 				resp = respAllow
 				for _, action := range intent.Actions {
 					read := PermAsk
@@ -198,7 +230,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 					})
 				}
 			}
-		} else {
+		default:
 			resp = respAllow
 		}
 

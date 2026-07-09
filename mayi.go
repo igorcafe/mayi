@@ -623,6 +623,7 @@ func permForIntent(configs []Config, intent Intent) Perm {
 			if (action.Read && conf.Read == PermAsk) || (action.Write && conf.Write == PermAsk) {
 				perm = PermAsk
 			}
+			break
 		}
 	}
 
@@ -657,7 +658,11 @@ func parseConfig(r io.Reader) ([]Config, error) {
 			continue
 		}
 
-		var conf Config
+		conf := Config{
+			Program: program,
+			Read:    PermAsk,
+			Write:   PermAsk,
+		}
 
 		key := strings.TrimSpace(chunks[0])
 		key = regexp.MustCompile(`\$\w+`).ReplaceAllStringFunc(key, func(prev string) string {
@@ -671,29 +676,25 @@ func parseConfig(r io.Reader) ([]Config, error) {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "[mayi] ignoring invalid regexp:", line)
 		}
-		conf.Program = program
 
 		val := strings.TrimSpace(chunks[1])
-
-		if strings.Contains(val, "write:deny") {
-			conf.Write = PermDeny
-		} else if strings.Contains(val, "write:ask") {
-			conf.Write = PermAsk
-		} else if strings.Contains(val, "write") {
-			conf.Write = PermAllow
-		}
-
-		if strings.Contains(val, "read:deny") {
-			conf.Read = PermDeny
-		} else if strings.Contains(val, "read:ask") {
-			conf.Read = PermAsk
-		} else if strings.Contains(val, "read") {
-			conf.Read = PermAllow
-		}
-
-		if strings.Contains(val, "deny") && conf.Read != PermDeny && conf.Write != PermDeny {
-			conf.Read = PermDeny
-			conf.Write = PermDeny
+		for field := range strings.FieldsSeq(val) {
+			switch field {
+			case "write:deny":
+				conf.Write = PermDeny
+			case "write":
+				conf.Write = PermAllow
+			case "read:deny":
+				conf.Read = PermDeny
+			case "read":
+				conf.Read = PermAllow
+			case "allow":
+				conf.Read = PermAllow
+				conf.Write = PermAllow
+			case "deny":
+				conf.Read = PermDeny
+				conf.Write = PermDeny
+			}
 		}
 
 		configs = append(configs, conf)

@@ -152,15 +152,20 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	stdin := bufio.NewScanner(os.Stdin)
 
 	promptUser := func(intent Intent) bool {
-		fmt.Fprintf(os.Stderr, "%s\n[Y/n]: ", intent.Prompt)
-		if !stdin.Scan() {
-			return false
+		for {
+			fmt.Fprintf(os.Stderr, "%s\n[y/n]: ", intent.Prompt)
+			if !stdin.Scan() {
+				_ = stdin.Err()
+				continue
+			}
+			if strings.ContainsAny(stdin.Text(), "Nn") {
+				return false
+			}
+			if !strings.ContainsAny(stdin.Text(), "Yy") {
+				continue
+			}
+			return true
 		}
-		if strings.ContainsAny(stdin.Text(), "Nn") {
-			return false
-		}
-
-		return true
 	}
 
 	if usePopup {

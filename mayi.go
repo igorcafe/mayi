@@ -75,6 +75,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	log.SetFlags(log.Lshortfile)
 	log.SetOutput(io.Discard)
 
+	// TODO: use flag package in future if i feel its necessary
 	for {
 		if os.Args[1] == "-v" {
 			log.SetOutput(os.Stderr)
@@ -93,11 +94,18 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 
 	program := path.Base(os.Args[1])
 
+	// necessary to run seccomp without privileges.
+	// the limitation is that the child process can't use sudo or similar.
+	// `mayi sudo ls` wont work, but `sudo mayi ls` will.
 	err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 	if err != nil {
 		return err
 	}
 
+	// make child process treat mayi process as their "init process", in a sense
+	// that any orphan process will be reparented to mayi, instead of PID 1.
+	// we can only (easily) read memory from descendant processes, so this fixes
+	// programs that spawn a lot of processes.
 	err = unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0)
 	if err != nil {
 		return err
@@ -214,6 +222,9 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			unix.SECCOMP_IOCTL_NOTIF_RECV,
 			uintptr(unsafe.Pointer(&req)),
 		)
+		// TODO: understand when this syscall returns ENOENT
+		// right now i check if the process exited, and if not i just ignore
+		// ENOENT and repeat the loop
 		if errno == unix.ENOENT {
 			var status unix.WaitStatus
 			wpid, err := unix.Wait4(initialPid, &status, unix.WNOHANG, nil)
@@ -244,6 +255,8 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			Error: -int32(unix.EACCES),
 		}
 
+		// TODO: don't use this for file operations, instead resolve the operations in the supervisor
+		// and transfer file descriptors to the child, when applicable
 		respAllow := SeccompNotifResp{
 			ID:    req.ID,
 			Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE,
@@ -277,6 +290,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 				perm = PermDeny
 			}
 
+			// remember this allow/deny on this session and don't ask again
 			for _, action := range intent.Actions {
 				read := PermAsk
 				if action.Read {
@@ -332,6 +346,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 }
 
+// describe what the syscall is trying to do.
 func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 	var intent Intent
 
@@ -522,6 +537,7 @@ func resolveProcessPath(pid int, dirfd int, path string) (string, error) {
 	return filepath.Join(cwd, path), err
 }
 
+// uses syscall process_vm_readv to read process memory at address addr
 func readProcessString(pid int, addr uintptr) (string, error) {
 	buf := make([]byte, 1024)
 	local := []unix.Iovec{
@@ -563,8 +579,15 @@ func readProcessString(pid int, addr uintptr) (string, error) {
 }
 
 func runChild() error {
+	// we need to ensure the Exec in the end is running on the same OS thread as the one
+	// we installed seccomp, otherwise it won't have any effect...
+	// I found this bug running a loop 1000 times doing mayi cat ~/secret
+	// TODO: add a test for this
 	runtime.LockOSThread()
+
 	var err error
+
+	// inherited at ForkExec
 	childSock := 3
 
 	bpfStmt := func(code uint16, k uint32) unix.SockFilter {
@@ -584,11 +607,16 @@ func runChild() error {
 	}
 
 	filter := []unix.SockFilter{
+		// LD at register A (default) a Word (amd64 = 8 bytes) from the absolute address 0,
+		// which is the start of the system call data struct, where its number (see req.Data.Nr) is located
 		bpfStmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 0),
 
+		// jmp to next line (user notify) if syscall is open, otherwise skip next like
 		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_OPEN, 0, 1),
 		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
 
+		// and the same idea as before repeats until the end.
+		// it may be more efficient to just have a single RET statement and make all jumps to a single place
 		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_CREAT, 0, 1),
 		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
 
@@ -613,6 +641,7 @@ func runChild() error {
 		bpfJump(unix.BPF_JMP|unix.BPF_JEQ|unix.BPF_K, unix.SYS_RENAMEAT2, 0, 1),
 		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_USER_NOTIF),
 
+		// if its none of the intercepted system calls, just allow it
 		bpfStmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW),
 	}
 
@@ -666,6 +695,14 @@ func (p Perm) String() string {
 	}
 }
 
+// TODO: make it more flexible.
+// Maybe use "inherited" types for Action instead of a []Action, for example
+// RenameAction, OpenAction, DeleteAction. These types can even contain the
+// system call number and arguments, which will make  calling the syscall
+// from the supervisor easier.
+// Or even just use a single Action type capable of holding all that info.
+// That will also remove the need of the `Prompt` key, since the caller
+// could make the prompt from the action type, affected paths (if any)...
 type Intent struct {
 	Program string
 	Prompt  string
@@ -678,6 +715,9 @@ type Action struct {
 	Write bool
 }
 
+// Initially config would be just a path regexp and the permissions on that path.
+// But now I'm expanding it to allow other types of keys and values.
+// Maybe I should rewrite this type
 type Config struct {
 	Program string
 	Key     string
@@ -738,6 +778,9 @@ func permForIntent(configs []Config, intent Intent) Perm {
 	return perm
 }
 
+// parses the .ini file, expands $ENV variables... paths must start with /
+// otherwise they will be considered special keywords, like dirs and popup.
+// see mayi.example.ini
 func parseConfig(r io.Reader) ([]Config, error) {
 	var configs []Config
 	scanner := bufio.NewScanner(r)
@@ -818,11 +861,13 @@ func parseConfig(r io.Reader) ([]Config, error) {
 	return configs, scanner.Err()
 }
 
+// passes a file descriptor from one process to the other via socket
 func sendFD(sock int, fd int) error {
 	rights := unix.UnixRights(fd)
 	return unix.Sendmsg(sock, []byte{0}, rights, nil, 0)
 }
 
+// receives a file descriptor from the socket
 func recvFD(sock int) (int, error) {
 	buf := make([]byte, 1)
 	oob := make([]byte, unix.CmsgSpace(4))

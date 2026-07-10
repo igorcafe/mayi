@@ -272,11 +272,11 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			accepted := promptUser(intent)
 			if accepted {
 				perm = PermAllow
+				resp = respAllow
 			} else {
 				perm = PermDeny
 			}
 
-			resp = respAllow
 			for _, action := range intent.Actions {
 				read := PermAsk
 				if action.Read {

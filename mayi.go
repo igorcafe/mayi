@@ -29,7 +29,7 @@ func main() {
 	}
 
 	if os.Args[1] == "--child" {
-		err := runChild(context.Background())
+		err := runChild()
 		panic(err)
 	}
 
@@ -171,7 +171,6 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 
 	for _, conf := range slices.Backward(configs) {
-		// TODO: os.Args[1] is fragile... passing a full path like /bin/bash won't match [bash] conf
 		if conf.Program != "*" && conf.Program != program {
 			continue
 		}
@@ -329,8 +328,6 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			return errno
 		}
 	}
-
-	return nil
 }
 
 func parseSyscallIntent(req SeccompNotif) (Intent, error) {
@@ -563,7 +560,7 @@ func readProcessString(pid int, addr uintptr) (string, error) {
 	return unsafe.String(&buf[0], n), nil
 }
 
-func runChild(ctx context.Context) error {
+func runChild() error {
 	runtime.LockOSThread()
 	var err error
 	childSock := 3

@@ -71,12 +71,14 @@ This project is currently a proof of concept and I'm NOT a security researcher.
 
 ### Known issues
 
-Currently `mayi` just approve or deny a system call.
-For path operations that's not enough, because while a thread can ask to read a innocent file, such as `~/.editorconfig`, another thread can change this buffer to another path, like `~/.ssh/id_rsa`.
+~~Currently `mayi` just approve or deny a system call.~~
+~~For path operations that's not enough, because while a thread can ask to read a innocent file, such as `~/.editorconfig`, another thread can change this buffer to another path, like `~/.ssh/id_rsa`.~~
 
-If the child process is able to change the path buffer and mayi sends a `SECCOMP_USER_NOTIF_FLAG_CONTINUE`, it will allow the child process to read a different path from the one allowed.
+~~If the child process is able to change the path buffer and mayi sends a `SECCOMP_USER_NOTIF_FLAG_CONTINUE`, it will allow the child process to read a different path from the one allowed.~~
 
-The way to (probably) fix this is by resolving the system calls in the supervisor with its own copied paths, and to send the file descriptor to the child process, when applicable. I plan to do that soon.
+~~The way to (probably) fix this is by resolving the system calls in the supervisor with its own copied paths, and to send the file descriptor to the child process, when applicable. I plan to do that soon.~~
+
+Now fixed. Performing file operations in the supervisor process.
 
 Another issue is that some programs can launch other programs without being child processes, like KDE "Open with...".
 Since it's not a child process, it cannot be constrained by mayi.

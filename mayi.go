@@ -18,10 +18,15 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
+
+var configs []Config
+
+var program string
 
 func main() {
 	if len(os.Args) < 2 {
@@ -70,6 +75,14 @@ type SeccompNotifResp struct {
 	Flags uint32
 }
 
+type SeccompNotifAddFD struct {
+	ID         uint64
+	Flags      uint32
+	SrcFD      uint32
+	NewFD      uint32
+	NewFDFlags uint32
+}
+
 func runParent(ctx context.Context, childSock, parentSock int) error {
 	usePopup := false
 	log.SetFlags(log.Lshortfile)
@@ -92,7 +105,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		break
 	}
 
-	program := path.Base(os.Args[1])
+	program = path.Base(os.Args[1])
 
 	// necessary to run seccomp without privileges.
 	// the limitation is that the child process can't use sudo or similar.
@@ -134,12 +147,10 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		return err
 	}
 
-	fd, err := recvFD(parentSock)
+	seccompFD, err := recvFD(parentSock)
 	if err != nil {
 		return err
 	}
-
-	var configs []Config
 
 	configPath := os.Getenv("MAYI_CONFIG")
 	if configPath == "" {
@@ -168,12 +179,15 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			fmt.Fprintf(os.Stderr, "%s\n[y/n]: ", intent.Prompt)
 			if !stdin.Scan() {
 				_ = stdin.Err()
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
-			if strings.ContainsAny(stdin.Text(), "Nn") {
+			text := strings.ToLower(strings.TrimSpace(stdin.Text()))
+			if text == "n" {
 				return false
 			}
-			if !strings.ContainsAny(stdin.Text(), "Yy") {
+			if text != "y" {
+				time.Sleep(500 * time.Millisecond)
 				continue
 			}
 			return true
@@ -218,7 +232,7 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 		req := SeccompNotif{}
 		_, _, errno := unix.Syscall(
 			unix.SYS_IOCTL,
-			uintptr(fd),
+			uintptr(seccompFD),
 			unix.SECCOMP_IOCTL_NOTIF_RECV,
 			uintptr(unsafe.Pointer(&req)),
 		)
@@ -250,72 +264,14 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 			return errno
 		}
 
-		respDeny := SeccompNotifResp{
-			ID:    req.ID,
-			Error: -int32(unix.EACCES),
-		}
-
-		// TODO: don't use this for file operations, instead resolve the operations in the supervisor
-		// and transfer file descriptors to the child, when applicable
-		respAllow := SeccompNotifResp{
-			ID:    req.ID,
-			Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE,
-		}
-
-		resp := respDeny
-
-		intent, err := parseSyscallIntent(req)
+		resp, err := processSeccompNotifReq(seccompFD, req, promptUser)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			return err
-		}
-		intent.Program = program
-
-		perm := permForIntent(configs, intent)
-
-		switch perm {
-		case PermDeny:
-			fmt.Fprint(os.Stderr, "Permission denied for: ")
-			for _, action := range intent.Actions {
-				fmt.Fprint(os.Stderr, action.Path)
-			}
-			fmt.Fprintln(os.Stderr)
-			resp = respDeny
-		case PermAsk:
-			accepted := promptUser(intent)
-			if accepted {
-				perm = PermAllow
-				resp = respAllow
-			} else {
-				perm = PermDeny
-			}
-
-			// remember this allow/deny on this session and don't ask again
-			for _, action := range intent.Actions {
-				read := PermAsk
-				if action.Read {
-					read = perm
-				}
-
-				write := PermAsk
-				if action.Write {
-					write = perm
-				}
-
-				configs = append(configs, Config{
-					Program: intent.Program,
-					Pattern: regexp.MustCompile("^" + regexp.QuoteMeta(action.Path) + "$"),
-					Read:    read,
-					Write:   write,
-				})
-			}
-		default:
-			resp = respAllow
+			fmt.Fprintln(os.Stderr, "processSeccompNotifReq: ", err)
 		}
 
 		_, _, errno = unix.Syscall(
 			unix.SYS_IOCTL,
-			uintptr(fd),
+			uintptr(seccompFD),
 			unix.SECCOMP_IOCTL_NOTIF_SEND,
 			uintptr(unsafe.Pointer(&resp)),
 		)
@@ -346,26 +302,80 @@ func runParent(ctx context.Context, childSock, parentSock int) error {
 	}
 }
 
+func requestPermission(intent Intent, promptUser func(Intent) bool) Perm {
+	perm := permForIntent(configs, intent)
+
+	switch perm {
+	case PermDeny, PermAllow:
+	case PermAsk:
+		log.Print("asking permission for ", intent)
+		accepted := promptUser(intent)
+		if accepted {
+			perm = PermAllow
+		} else {
+			perm = PermDeny
+		}
+
+		for _, action := range intent.Actions {
+			read := PermAsk
+			if action.Read {
+				read = perm
+			}
+
+			write := PermAsk
+			if action.Write {
+				write = perm
+			}
+
+			configs = append(configs, Config{
+				Program: intent.Program,
+				Pattern: regexp.MustCompile("^" + regexp.QuoteMeta(action.Path) + "$"),
+				Read:    read,
+				Write:   write,
+			})
+		}
+	default:
+		perm = PermDeny
+	}
+
+	if perm == PermDeny {
+		fmt.Fprint(os.Stderr, "Permission denied for: ")
+		for _, action := range intent.Actions {
+			fmt.Fprint(os.Stderr, action.Path, ", ")
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
+	return perm
+}
+
 // describe what the syscall is trying to do.
-func parseSyscallIntent(req SeccompNotif) (Intent, error) {
-	var intent Intent
+func processSeccompNotifReq(seccompFD int, req SeccompNotif, promptUser func(Intent) bool) (SeccompNotifResp, error) {
+	respDeny := SeccompNotifResp{
+		ID:    req.ID,
+		Error: -int32(unix.EACCES),
+	}
 
 	switch req.Data.Nr {
 	case unix.SYS_OPEN, unix.SYS_CREAT, unix.SYS_OPENAT, unix.SYS_OPENAT2:
 		dirfd := unix.AT_FDCWD
 		rawPath := uintptr(0)
 		flags := unix.O_WRONLY | unix.O_CREAT | unix.O_TRUNC
+		mode := uint32(0)
 
 		switch req.Data.Nr {
 		case unix.SYS_OPEN:
 			rawPath = uintptr(req.Data.Args[0])
 			flags = int(int32(req.Data.Args[1]))
+			mode = uint32(req.Data.Args[2])
 		case unix.SYS_CREAT:
 			rawPath = uintptr(req.Data.Args[0])
+			mode = uint32(req.Data.Args[1])
 		case unix.SYS_OPENAT:
 			dirfd = int(int32(req.Data.Args[0]))
 			rawPath = uintptr(req.Data.Args[1])
 			flags = int(int32(req.Data.Args[2]))
+			mode = uint32(req.Data.Args[3])
 		case unix.SYS_OPENAT2:
 			dirfd = int(int32(req.Data.Args[0]))
 			rawPath = uintptr(req.Data.Args[1])
@@ -374,14 +384,26 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 			panic("wtf?")
 		}
 
-		path, err := readProcessString(int(req.Pid), rawPath)
-		if err != nil {
-			return intent, fmt.Errorf("open(%d): %w", req.Data.Nr, err)
+		// O_PATH is used to open the file as a "relative directory".
+		// The kernel doesn't allow reading, writing nor changing metadata.
+		// This kind of file descriptor cannot be transfered using seccomp,
+		// but we shouldn't(?) worry about TOCTOU in this case since this
+		// operation doesn't seem dangerous.
+		if flags&unix.O_PATH != 0 {
+			return SeccompNotifResp{
+				ID:    req.ID,
+				Flags: unix.SECCOMP_USER_NOTIF_FLAG_CONTINUE,
+			}, nil
 		}
 
-		path, err = resolveProcessPath(int(req.Pid), dirfd, path)
+		realPath, err := readProcessString(int(req.Pid), rawPath)
 		if err != nil {
-			return intent, fmt.Errorf("open(%d): %w", req.Data.Nr, err)
+			return respDeny, fmt.Errorf("open(%d): %w", req.Data.Nr, err)
+		}
+
+		realPath, err = resolveProcessPath(int(req.Pid), dirfd, realPath)
+		if err != nil {
+			return respDeny, fmt.Errorf("open(%d): %w", req.Data.Nr, err)
 		}
 
 		read := false
@@ -391,36 +413,73 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 		switch flags & unix.O_ACCMODE {
 		case unix.O_RDONLY:
 			read = true
-			prompt = fmt.Sprintf("May I read from '%s'?", path)
+			prompt = fmt.Sprintf("May I read from '%s'?", realPath)
 		case unix.O_WRONLY:
 			write = true
-			prompt = fmt.Sprintf("May I write to '%s'?", path)
+			prompt = fmt.Sprintf("May I write to '%s'?", realPath)
 		case unix.O_RDWR:
 			read = true
 			write = true
-			prompt = fmt.Sprintf("May I read AND write to '%s'?", path)
+			prompt = fmt.Sprintf("May I read AND write to '%s'?", realPath)
 		default:
 			// TODO:
 			read = true
 			write = true
-			prompt = fmt.Sprintf("May I potentially read AND write your '%s'?", path)
+			prompt = fmt.Sprintf("May I potentially read AND write your '%s'?", realPath)
 		}
 
-		return Intent{
-			Program: "?",
+		intent := Intent{
+			Program: program,
 			Prompt:  prompt,
 			Actions: []Action{
 				{
-					Path:  path,
+					Path:  realPath,
 					Read:  read,
 					Write: write,
 				},
 			},
-		}, nil
+		}
+
+		if requestPermission(intent, promptUser) == PermAllow {
+			fd, err := unix.Openat(unix.AT_FDCWD, realPath, flags, mode)
+			if errno, as := errors.AsType[unix.Errno](err); as {
+				return SeccompNotifResp{
+					ID:    req.ID,
+					Error: -int32(errno),
+				}, nil
+			}
+			if err != nil {
+				return respDeny, nil
+			}
+			defer unix.Close(fd)
+
+			addfd := SeccompNotifAddFD{
+				ID:    req.ID,
+				SrcFD: uint32(fd),
+			}
+
+			childFD, _, errno := unix.Syscall(
+				unix.SYS_IOCTL,
+				uintptr(seccompFD),
+				unix.SECCOMP_IOCTL_NOTIF_ADDFD,
+				uintptr(unsafe.Pointer(&addfd)),
+			)
+			if errno != 0 {
+				return respDeny, errno
+			}
+
+			return SeccompNotifResp{
+				ID:  req.ID,
+				Val: int64(childFD),
+			}, nil
+		}
+
+		return respDeny, nil
 
 	case unix.SYS_UNLINK, unix.SYS_UNLINKAT:
 		dirfd := unix.AT_FDCWD
 		rawPath := uintptr(0)
+		flags := 0
 
 		switch req.Data.Nr {
 		case unix.SYS_UNLINK:
@@ -428,35 +487,56 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 		case unix.SYS_UNLINKAT:
 			dirfd = int(int32(req.Data.Args[0]))
 			rawPath = uintptr(req.Data.Args[1])
+			flags = int(int32(req.Data.Args[2]))
 		}
 
-		path, err := readProcessString(int(req.Pid), rawPath)
+		realPath, err := readProcessString(int(req.Pid), rawPath)
 		if err != nil {
-			return intent, fmt.Errorf("unlink(%d): %w", req.Data.Nr, err)
+			return respDeny, fmt.Errorf("unlink(%d): %w", req.Data.Nr, err)
 		}
 
-		path, err = resolveProcessPath(int(req.Pid), dirfd, path)
+		realPath, err = resolveProcessPath(int(req.Pid), dirfd, realPath)
 		if err != nil {
-			return intent, fmt.Errorf("unlink(%d): %w", req.Data.Nr, err)
+			return respDeny, fmt.Errorf("unlink(%d): %w", req.Data.Nr, err)
 		}
 
-		return Intent{
-			Program: os.Args[1],
-			Prompt:  fmt.Sprintf("May I delete your '%s'?", path),
+		intent := Intent{
+			Program: program,
+			Prompt:  fmt.Sprintf("May I delete your '%s'?", realPath),
 			Actions: []Action{
 				{
-					Path:  path,
+					Path:  realPath,
 					Read:  false,
 					Write: true,
 				},
 			},
-		}, nil
+		}
+
+		if requestPermission(intent, promptUser) == PermAllow {
+			err := unix.Unlinkat(unix.AT_FDCWD, realPath, flags)
+			if errno, as := errors.AsType[unix.Errno](err); as {
+				return SeccompNotifResp{
+					ID:    req.ID,
+					Error: -int32(errno),
+				}, nil
+			}
+			if err != nil {
+				return respDeny, nil
+			}
+
+			return SeccompNotifResp{
+				ID: req.ID,
+			}, nil
+		}
+
+		return respDeny, nil
 
 	case unix.SYS_RENAME, unix.SYS_RENAMEAT, unix.SYS_RENAMEAT2:
 		oldDirfd := unix.AT_FDCWD
 		newDirfd := unix.AT_FDCWD
 		rawOldPath := uintptr(0)
 		rawNewPath := uintptr(0)
+		flags := uint(0)
 
 		switch req.Data.Nr {
 		case unix.SYS_RENAME:
@@ -467,31 +547,31 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 			rawOldPath = uintptr(req.Data.Args[1])
 			newDirfd = int(int32(req.Data.Args[2]))
 			rawNewPath = uintptr(req.Data.Args[3])
-			// TODO: args[4] in renameat2 is a set of flags, should i care?
+			flags = uint(req.Data.Args[4])
 		}
 
 		oldPath, err := readProcessString(int(req.Pid), rawOldPath)
 		if err != nil {
-			return intent, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
+			return respDeny, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
 		}
 
 		oldPath, err = resolveProcessPath(int(req.Pid), oldDirfd, oldPath)
 		if err != nil {
-			return intent, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
+			return respDeny, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
 		}
 
 		newPath, err := readProcessString(int(req.Pid), rawNewPath)
 		if err != nil {
-			return intent, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
+			return respDeny, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
 		}
 
 		newPath, err = resolveProcessPath(int(req.Pid), newDirfd, newPath)
 		if err != nil {
-			return intent, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
+			return respDeny, fmt.Errorf("rename(%d): %w", req.Data.Nr, err)
 		}
 
-		return Intent{
-			Program: os.Args[1],
+		intent := Intent{
+			Program: program,
 			Prompt:  fmt.Sprintf("May I rename '%s' to '%s'?", oldPath, newPath),
 			Actions: []Action{
 				{
@@ -505,10 +585,29 @@ func parseSyscallIntent(req SeccompNotif) (Intent, error) {
 					Write: true,
 				},
 			},
-		}, nil
+		}
+
+		if requestPermission(intent, promptUser) == PermAllow {
+			err := unix.Renameat2(unix.AT_FDCWD, oldPath, unix.AT_FDCWD, newPath, flags)
+			if errno, as := errors.AsType[unix.Errno](err); as {
+				return SeccompNotifResp{
+					ID:    req.ID,
+					Error: -int32(errno),
+				}, nil
+			}
+			if err != nil {
+				return respDeny, nil
+			}
+
+			return SeccompNotifResp{
+				ID: req.ID,
+			}, nil
+		}
+
+		return respDeny, nil
 	}
 
-	return intent, errors.New("Syscall handling not implemented")
+	return respDeny, errors.New("Syscall handling not implemented")
 }
 
 func resolveProcessPath(pid int, dirfd int, path string) (string, error) {
@@ -650,15 +749,15 @@ func runChild() error {
 		Filter: &filter[0],
 	}
 
-	r1, _, syserr := unix.Syscall(
+	r1, _, errno := unix.Syscall(
 		unix.SYS_SECCOMP,
 		unix.SECCOMP_SET_MODE_FILTER,
 		unix.SECCOMP_FILTER_FLAG_NEW_LISTENER,
 		uintptr(unsafe.Pointer(&prog)),
 	)
 	fd := int(r1)
-	if syserr != 0 {
-		return syserr
+	if errno != 0 {
+		return errno
 	}
 
 	if err := sendFD(childSock, fd); err != nil {
@@ -728,7 +827,19 @@ type Config struct {
 }
 
 func (c Config) String() string {
-	return fmt.Sprintf(`{Program: "%s", Pattern: "%s", Read: %s, Write: %s}`, c.Program, c.Pattern.String(), c.Read.String(), c.Write.String())
+	pattern := ""
+	if c.Pattern != nil {
+		pattern = c.Pattern.String()
+	}
+	return fmt.Sprintf(
+		`{Program: "%s", Key: "%s", Val: "%s", Pattern: "%s", Read: %s, Write: %s}`,
+		c.Program,
+		c.Key,
+		c.Val,
+		pattern,
+		c.Read.String(),
+		c.Write.String(),
+	)
 }
 
 func permForIntent(configs []Config, intent Intent) Perm {
